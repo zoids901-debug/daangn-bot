@@ -1,0 +1,43 @@
+name: 당근 즉석검색
+
+# 깃허브 화면에서 'Run workflow' 버튼으로 직접 실행 (키워드 입력)
+on:
+  workflow_dispatch:
+    inputs:
+      keyword:
+        description: '검색할 키워드 (예: 아이폰15)'
+        required: true
+      region:
+        description: '지역 (비우면 전국. 예: 서울,경기)'
+        required: false
+        default: ''
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 라이브러리 설치
+        run: pip install -r requirements.txt
+
+      - name: 즉석검색 실행
+        env:
+          TELEGRAM_TOKEN:     ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: python daangn_search.py --mode search --keyword "${{ inputs.keyword }}" --region "${{ inputs.region }}"
+
+      - name: 검색결과 CSV 첨부
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 검색결과
+          path: '*.csv'
+          if-no-files-found: ignore
