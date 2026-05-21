@@ -1,0 +1,35 @@
+name: 차단 임계치 측정 (probe)
+
+# 깃허브 IP가 당근에 몇 번까지 요청할 수 있는지 측정한다.
+# Actions 탭에서 Run workflow 로 실행 → 로그에서 결과 확인.
+on:
+  workflow_dispatch:
+    inputs:
+      max:
+        description: '최대 요청 수'
+        required: false
+        default: '600'
+      delay:
+        description: '요청 간격(초). 작을수록 빠르고 차단 위험 큼'
+        required: false
+        default: '0.3'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 라이브러리 설치
+        run: pip install requests
+
+      - name: 차단 임계치 측정
+        env:
+          PROBE_MAX:   ${{ inputs.max }}
+          PROBE_DELAY: ${{ inputs.delay }}
+        run: python probe.py
