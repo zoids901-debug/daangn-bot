@@ -336,6 +336,7 @@ def run_search(keyword, region):
                 seen_fp.add(fp)
                 art["keyword"] = keyword
                 results.append(art)
+                push_notion(art)   # 노션 실시간 적재 (찾는 즉시)
 
     # CSV 저장 (워크플로우가 결과물로 첨부)
     csv_name = f"검색결과_{keyword.replace(' ', '_')}.csv"
@@ -345,10 +346,32 @@ def run_search(keyword, region):
         for it in results:
             w.writerow([it["addr"], it["title"], it["price"], it["link"]])
 
+    # 텔레그램은 개별 전송 없이 끝에 요약 1건만 (도배 방지)
+    prices = []
     for it in results:
-        send_item(it)
-    send_telegram(f"🏁 즉석검색 완료\n키워드: {keyword}\n총 {len(results)}건 발견")
-    print(f"[search] 완료 — {len(results)}건")
+        digits = "".join(ch for ch in it["price"] if ch.isdigit())
+        if digits and int(digits) > 0:
+            prices.append(int(digits))
+    prov = {}
+    for it in results:
+        if it["addr"]:
+            p = it["addr"].split()[0]
+            prov[p] = prov.get(p, 0) + 1
+    top = sorted(prov.items(), key=lambda x: -x[1])[:6]
+
+    summary = (
+        f"🏁 즉석검색 완료\n"
+        f"━━━━━━━━━━━━\n"
+        f"🔍 {keyword} ({scope})\n"
+        f"✅ 총 {len(results)}건 발견\n"
+    )
+    if prices:
+        summary += f"💰 {min(prices):,} ~ {max(prices):,}원 (평균 {sum(prices)//len(prices):,}원)\n"
+    if top:
+        summary += "📍 " + " / ".join(f"{k} {v}" for k, v in top) + "\n"
+    summary += "\n📋 전체 목록 → 노션 DB · CSV"
+    send_telegram(summary)
+    print(f"[search] 완료 — {len(results)}건 (노션 실시간 / 텔레그램 요약)")
 
 
 # ==================== 모드: map (지역코드 수집) ====================
