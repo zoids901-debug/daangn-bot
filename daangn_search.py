@@ -442,8 +442,8 @@ def run_aggregate(target, keyword, indir):
 
 # ==================== 모드: map (지역코드 수집) ====================
 def run_map():
-    print("[map] 전국 지역코드 수집 시작 (1~8500)")
-    ids = list(range(1, 8501, 2))
+    print("[map] 전국 지역코드 수집 시작 (1~8500, 홀짝 전체)")
+    ids = list(range(1, 8501))
     new_map = {}
     lock = threading.Lock()
     done = [0]
