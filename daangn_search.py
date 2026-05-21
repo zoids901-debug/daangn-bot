@@ -132,6 +132,17 @@ def get_tids_by_region(region_map, region_keyword):
     return sorted(int(t) for t, name in region_map.items() if kw in name)
 
 
+def keyword_words(kw):
+    """키워드를 단어 단위로 쪼개 정규화. '더블알엘 모자' -> ['더블알엘','모자']"""
+    return [w for w in (p.replace(" ", "").lower() for p in kw.split()) if w]
+
+
+def title_matches(title, words):
+    """제목에 키워드의 모든 단어가 들어있으면 True (순서 무관, 띄어쓰기 무시)."""
+    title_norm = title.replace(" ", "").lower()
+    return bool(words) and all(w in title_norm for w in words)
+
+
 # ==================== 페이지 파싱 ====================
 def _fix(text):
     """당근 페이지의 깨진 한글 인코딩 복구."""
@@ -164,14 +175,16 @@ def parse_page(html):
                 price = format(int(float(it.get("price", 0))), ",") + "원"
             except Exception:
                 price = "0원"
-            id_val = it.get("id", "")
-            art_id = id_val.split("/")[-2] if "/" in id_val else ""
+            # 매물 데이터의 href 가 곧 올바른 전체 주소 (/kr/buy-sell/...).
+            # 옛 코드는 id 로 /articles/ 주소를 만들어 링크가 다 깨졌었음.
+            href = it.get("href", "")
+            if not href:
+                continue
             items.append({
                 "title": title,
                 "price": price,
                 "addr":  addr or "지역미상",
-                "id":    art_id,
-                "link":  f"https://www.daangn.com/articles/{art_id}",
+                "link":  href,
             })
         return addr, items
     except Exception:
@@ -212,7 +225,7 @@ def run_watch():
     first_run = len(seen) == 0   # 첫 실행이면 알림 도배를 막기 위해 조용히 기록만 한다
 
     tids = sorted(int(t) for t in region_map.keys())
-    norm_keywords = [(k, k.replace(" ", "").lower()) for k in keywords]
+    norm_keywords = [(k, keyword_words(k)) for k in keywords]
     today = datetime.date.today().isoformat()
 
     print(f"[watch] 키워드 {keywords} / 지역 {len(tids)}개 / 첫실행={first_run}")
@@ -227,11 +240,10 @@ def run_watch():
                 print(f"  진행 {done}/{len(tids)} ... 신규 {len(new_items)}건")
             _, articles = fut.result()
             for art in articles:
-                if not art["id"] or art["link"] in seen:
+                if not art["link"] or art["link"] in seen:
                     continue
-                title_norm = art["title"].replace(" ", "").lower()
-                for kw, kw_norm in norm_keywords:
-                    if kw_norm in title_norm:
+                for kw, words in norm_keywords:
+                    if title_matches(art["title"], words):
                         seen[art["link"]] = today
                         art["keyword"] = kw
                         new_items.append(art)
@@ -291,7 +303,7 @@ def run_search(keyword, region):
     send_telegram(f"🔍 즉석검색 시작\n키워드: {keyword}\n범위: {scope} ({len(tids)}개 지역)")
     print(f"[search] '{keyword}' / {scope} / {len(tids)}개 지역")
 
-    kw_norm = keyword.replace(" ", "").lower()
+    kw_words = keyword_words(keyword)
     results = []
     seen_fp = set()
     done = 0
@@ -303,7 +315,7 @@ def run_search(keyword, region):
                 print(f"  진행 {done}/{len(tids)} ... 발견 {len(results)}건")
             _, articles = fut.result()
             for art in articles:
-                if kw_norm not in art["title"].replace(" ", "").lower():
+                if not title_matches(art["title"], kw_words):
                     continue
                 fp = f"{art['title']}_{art['price']}_{art['addr']}"
                 if fp in seen_fp:
