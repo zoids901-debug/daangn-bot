@@ -414,13 +414,30 @@ def _write_csv(name, items):
 
 # ==================== 모드: aggregate (갈래 결과 집계·전달) ====================
 def run_aggregate(target, keyword, indir):
-    items = []
+    paths = []
     for root, _, files in os.walk(indir):
         for fn in files:
             if fn.endswith(".json"):
-                part = load_json(os.path.join(root, fn), [])
-                if isinstance(part, list):
-                    items.extend(part)
+                paths.append(os.path.join(root, fn))
+
+    # map: 갈래 결과는 {지역코드: 지역명} 딕셔너리
+    if target == "map":
+        region_map = load_json(REGION_MAP_FILE, {})
+        for p in paths:
+            part = load_json(p, {})
+            if isinstance(part, dict):
+                region_map.update(part)
+        save_json(REGION_MAP_FILE, region_map)
+        send_telegram(f"지역코드 수집 완료 — 총 {len(region_map)}개 지역")
+        print(f"[aggregate] region_map 총 {len(region_map)}개 지역")
+        return
+
+    # watch / search: 갈래 결과는 매물 리스트
+    items = []
+    for p in paths:
+        part = load_json(p, [])
+        if isinstance(part, list):
+            items.extend(part)
     # 링크 기준 중복 제거
     uniq = {}
     for it in items:
@@ -441,9 +458,9 @@ def run_aggregate(target, keyword, indir):
 
 
 # ==================== 모드: map (지역코드 수집) ====================
-def run_map():
-    print("[map] 전국 지역코드 수집 시작 (1~8500, 홀짝 전체)")
-    ids = list(range(1, 8501))
+def run_map(chunk=None, out=None):
+    print(f"[map] 전국 지역코드 수집 (1~8500 홀짝 전체 / chunk={chunk or '전체'})")
+    ids = apply_chunk(list(range(1, 8501)), chunk)
     new_map = {}
     lock = threading.Lock()
     done = [0]
@@ -465,11 +482,16 @@ def run_map():
             pass
         with lock:
             done[0] += 1
-            if done[0] % 500 == 0:
+            if done[0] % 100 == 0:
                 print(f"  진행 {done[0]}/{len(ids)} ... 수집 {len(new_map)}개")
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         list(ex.map(one, ids))
+
+    if out:
+        save_json(out, new_map)
+        print(f"[map] chunk {chunk} — {len(new_map)}개 지역 기록 ({out})")
+        return
 
     region_map = load_json(REGION_MAP_FILE, {})
     region_map.update(new_map)
@@ -487,7 +509,7 @@ def main():
     parser.add_argument("--region",  default="", help="search 지역 (비우면 전국)")
     parser.add_argument("--chunk",   default="", help="갈래 i/N (예: 3/20)")
     parser.add_argument("--out",     default="", help="갈래 결과 기록 파일")
-    parser.add_argument("--target",  default="", choices=["", "watch", "search"],
+    parser.add_argument("--target",  default="", choices=["", "watch", "search", "map"],
                         help="aggregate 대상")
     parser.add_argument("--indir",   default="results", help="aggregate 입력 폴더")
     args = parser.parse_args()
@@ -498,7 +520,7 @@ def main():
         run_search(args.keyword, args.region,
                    chunk=args.chunk or None, out=args.out or None)
     elif args.mode == "map":
-        run_map()
+        run_map(chunk=args.chunk or None, out=args.out or None)
     elif args.mode == "aggregate":
         run_aggregate(args.target, args.keyword, args.indir)
 
