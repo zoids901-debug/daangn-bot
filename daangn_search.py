@@ -55,7 +55,10 @@ REGION_ALIASES = {
 def send_telegram(msg):
     """텔레그램으로 메시지 1건 전송. 토큰이 없으면 화면 출력만 한다."""
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("[텔레그램 미설정] " + msg.replace("\n", " | "))
+        try:
+            print("[텔레그램 미설정] " + msg.replace("\n", " | "))
+        except UnicodeEncodeError:
+            print("[텔레그램 미설정] (콘솔 인코딩 문제로 메시지 출력 생략)")
         return
     try:
         requests.post(
