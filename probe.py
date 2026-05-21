@@ -1,17 +1,13 @@
 # -*- coding: utf-8 -*-
-"""당근 차단 임계치 측정기.
+"""당근 차단 임계치 측정 v2 — 요청 속도를 단계적으로 올리며 어디서 막히는지 찾는다.
 
-당근 지역 페이지를 일정 속도로 요청하면서, 어느 지점에서 차단이 시작되는지 기록한다.
-깃허브 액션에서 돌리면 '깃허브 IP 1개가 몇 번까지 버티는지'를 알 수 있다.
-이 수치로 매트릭스 분할(갈래 수)과 요청 간격을 정한다.
-
-환경변수:
-  PROBE_MAX   : 최대 요청 수 (기본 600)
-  PROBE_DELAY : 요청 간격 초 (기본 0.3)
+1차 측정에서 '천천히(초당 0.5회)는 600회까지 멀쩡, 6갈래 동시는 금방 차단'이 나왔다.
+즉 차단 기준은 '총 횟수'가 아니라 '속도(req/s)'. 이 스크립트로 안전한 최대 속도를 찾는다.
 """
 import sys
-import os
 import time
+from concurrent.futures import ThreadPoolExecutor
+
 import requests
 
 try:
@@ -19,14 +15,13 @@ try:
 except Exception:
     pass
 
-MAX_REQUESTS = int(os.environ.get("PROBE_MAX", "600"))
-DELAY        = float(os.environ.get("PROBE_DELAY", "0.3"))
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+PER_PHASE = 150
+# (동시 워커수, 워커당 추가 대기초) — 단계적으로 빠르게
+PHASES = [(2, 0.10), (3, 0.05), (4, 0.0), (6, 0.0), (10, 0.0)]
 
 
 def check(tid):
-    """지역 페이지 1개 요청. (정상여부, 상태, 응답시간) 반환."""
-    t0 = time.time()
     try:
         r = requests.get(
             "https://www.daangn.com/kr/buy-sell/",
@@ -34,61 +29,50 @@ def check(tid):
             headers={"User-Agent": UA},
             timeout=15,
         )
-        lat = time.time() - t0
-        # 차단되면 200이라도 데이터(지역명)가 빠진 페이지가 오므로 둘 다 확인
-        ok = (r.status_code == 200) and ("depth1RegionName" in r.text)
-        return ok, str(r.status_code), lat
-    except Exception as e:
-        return False, f"ERR:{type(e).__name__}", time.time() - t0
+        return (r.status_code == 200) and ("depth1RegionName" in r.text)
+    except Exception:
+        return False
 
 
 def main():
-    print("=== 당근 차단 임계치 측정 ===")
-    print(f"최대 {MAX_REQUESTS}회 / 요청간격 {DELAY}초\n")
+    print("=== 당근 차단 임계치 측정 v2 (속도 램프) ===\n")
+    tid_pool = [1 + (i * 17) % 8499 for i in range(5000)]
+    pos = 0
+    safe_rate = 0.0
 
-    # 전국에 골고루 퍼진 지역코드 (같은 페이지 반복 방지)
-    tids = [1 + (i * 17) % 8499 for i in range(MAX_REQUESTS)]
+    for workers, delay in PHASES:
+        tids = tid_pool[pos:pos + PER_PHASE]
+        pos += PER_PHASE
 
-    ok_count = fail_count = consec_fail = 0
-    first_fail_at = None
-    start = time.time()
+        def task(tid):
+            if delay:
+                time.sleep(delay)
+            return check(tid)
 
-    for i, tid in enumerate(tids, 1):
-        ok, status, lat = check(tid)
-        if ok:
-            ok_count += 1
-            consec_fail = 0
+        t0 = time.time()
+        ok = 0
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for r in ex.map(task, tids):
+                if r:
+                    ok += 1
+        elapsed = time.time() - t0
+        rate = PER_PHASE / elapsed
+        pct = ok / PER_PHASE * 100
+        verdict = "정상" if pct >= 90 else ("불안정" if pct >= 50 else "차단")
+        print(f"[{workers}워커/간격{delay}s] {PER_PHASE}회 중 {ok}성공 "
+              f"({pct:.0f}%) / {rate:.2f} req/s → {verdict}")
+
+        if pct >= 90:
+            safe_rate = rate
+            time.sleep(15)   # 다음 단계 전 잠깐 쉼
         else:
-            fail_count += 1
-            consec_fail += 1
-            if first_fail_at is None:
-                first_fail_at = i
-
-        if i % 50 == 0 or not ok:
-            elapsed = time.time() - start
-            rate = i / elapsed if elapsed else 0
-            mark = "OK" if ok else f"FAIL({status})"
-            print(f"[{i:4}회] {mark:14} 누적 OK {ok_count} / FAIL {fail_count} / {rate:.1f}req/s")
-
-        if consec_fail >= 8:
-            print(f"\n>>> 연속 8회 실패 — 차단 확정. {i}회째에서 막힘.")
+            print(f"\n>>> {rate:.2f} req/s 에서 막힘. 직전 안전속도 ≈ {safe_rate:.2f} req/s")
             break
-
-        time.sleep(DELAY)
-
-    elapsed = time.time() - start
-    total = ok_count + fail_count
-    print("\n=== 측정 결과 ===")
-    print(f"총 시도   : {total}회")
-    print(f"성공      : {ok_count}회")
-    print(f"실패      : {fail_count}회")
-    if first_fail_at:
-        print(f"첫 실패   : {first_fail_at}회째")
     else:
-        print(f"첫 실패   : 없음 — {total}회까지 차단 안 됨")
-    print(f"평균 속도 : {total / elapsed:.1f} req/s ({elapsed:.0f}초 소요)")
-    print(f"\n[판정] 깃허브 IP 1개당 안전 요청수 ≈ "
-          + (f"{first_fail_at - 1}회 미만" if first_fail_at else f"{total}회 이상 (한도 미도달)"))
+        print(f"\n>>> 모든 단계 통과 — 최소 {safe_rate:.2f} req/s 까지 안전")
+
+    print(f"\n[판정] 깃허브 IP 1개 안전 속도 ≈ {safe_rate:.2f} req/s")
+    print("       (매트릭스로 IP를 N개 쓰면 전체 속도 = 이 값 × N)")
 
 
 if __name__ == "__main__":
