@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-당근마켓 검색·알림 봇 (깃허브 액션용 단발 실행판)
+당근마켓 검색·알림 봇 (깃허브 액션 매트릭스판)
 
-이 스크립트는 한 번 실행되면 일을 끝내고 바로 종료한다.
-24시간 켜두는 봇이 아니라, 깃허브 액션이 정해진 시점에 깨워서 돌리는 구조다.
+한 IP로 전국을 몰아 훑으면 당근이 차단하므로, 전국을 여러 '갈래(chunk)'로
+쪼개 깃허브에서 동시 실행한다. 갈래마다 IP가 달라 차단되지 않는다.
 
 모드:
-  watch  : keywords.json 의 키워드들을 전국에서 찾아 '새 매물'만 텔레그램 알림
-           (seen.json 에 이미 본 매물을 기록해 중복 알림을 막는다)
-  search : 키워드 1개를 즉석으로 전국/지역 검색, 찾은 매물 전부 텔레그램 전송
-  map    : 전국 지역코드(region_map.json)를 새로 수집
+  watch   : 갈래 하나를 맡아 '새 매물 후보'를 찾아 결과파일(--out)에 기록
+  search  : 갈래 하나를 맡아 키워드 매물을 찾아 결과파일(--out)에 기록
+  aggregate : 갈래들의 결과파일을 모아 텔레그램·노션으로 전달 (--target watch|search)
+  map     : 전국 지역코드(region_map.json) 수집 (단일 실행, 안전 속도)
 
-비밀정보(텔레그램·노션 토큰)는 코드에 적지 않고 모두 환경변수로 받는다.
+--chunk i/N : 전체 지역 중 i번째 묶음만 처리 (1-기반)
+--out FILE  : 결과를 FILE(JSON)에 기록하고 전달은 하지 않음 (갈래 워커용)
+
+비밀정보(텔레그램·노션 토큰)는 환경변수로 받는다. 갈래 워커는 비밀정보가
+필요 없고, aggregate 단계에서만 사용한다.
 """
 import os
 import sys
@@ -28,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
-# ==================== 설정 (비밀정보는 환경변수에서) ====================
+# ==================== 설정 ====================
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID         = os.environ.get("TELEGRAM_CHAT_ID", "")
 NOTION_TOKEN    = os.environ.get("NOTION_TOKEN", "")
@@ -38,9 +42,10 @@ REGION_MAP_FILE = "region_map.json"
 KEYWORDS_FILE   = "keywords.json"
 SEEN_FILE       = "seen.json"
 
-SEEN_TTL_DAYS   = 30      # 이 일수보다 오래된 '본 매물' 기록은 정리
-MAX_WORKERS     = 4       # 동시 요청 수 (너무 높이면 차단 위험)
-SEND_DELAY      = 0.4     # 텔레그램 메시지 사이 간격(초) — 도배 제한 회피
+SEEN_TTL_DAYS   = 30
+# 동시 요청 수. 깃허브 IP 안전선은 측정상 2 (초당 ~1회). 환경변수로 덮어쓸 수 있다.
+MAX_WORKERS     = int(os.environ.get("MAX_WORKERS", "4"))
+SEND_DELAY      = 0.4   # 텔레그램 메시지 간격(초)
 
 REGION_ALIASES = {
     "전라도": "전라", "경상도": "경상", "충청도": "충청", "강원도": "강원",
@@ -50,6 +55,7 @@ REGION_ALIASES = {
     "세종":   "세종특별자치시", "전남": "전라남도", "전북": "전라북도",
     "경남":   "경상남도", "경북": "경상북도", "충남": "충청남도", "충북": "충청북도",
 }
+
 
 # ==================== 텔레그램 ====================
 def send_telegram(msg):
@@ -74,22 +80,22 @@ def send_item(item):
     """매물 1건을 텔레그램으로 전송 (+ 노션 적재)."""
     kw = f" ({item['keyword']})" if item.get("keyword") else ""
     send_telegram(
-        f"✨ [{item['addr']}]{kw}\n"
-        f"📦 {item['title']}\n"
-        f"💰 {item['price']}\n"
-        f"🔗 {item['link']}"
+        f"✨ [{item.get('addr','')}]{kw}\n"
+        f"📦 {item.get('title','')}\n"
+        f"💰 {item.get('price','')}\n"
+        f"🔗 {item.get('link','')}"
     )
     push_notion(item)
     time.sleep(SEND_DELAY)
 
 
-# ==================== 노션 적재 ====================
+# ==================== 노션 ====================
 def push_notion(item):
     """노션 DB에 매물 1건 기록. 토큰/DB가 없으면 조용히 건너뛴다."""
     if not NOTION_TOKEN or not NOTION_DATABASE:
         return
     try:
-        price_num = int(re.sub(r"[^\d]", "", item["price"]) or 0)
+        price_num = int(re.sub(r"[^\d]", "", item.get("price", "")) or 0)
         requests.post(
             "https://api.notion.com/v1/pages",
             headers={
@@ -100,11 +106,11 @@ def push_notion(item):
             json={
                 "parent": {"database_id": NOTION_DATABASE},
                 "properties": {
-                    "상품명": {"title":     [{"text": {"content": item["title"][:100]}}]},
+                    "상품명": {"title":     [{"text": {"content": item.get("title", "")[:100]}}]},
                     "검색어": {"rich_text": [{"text": {"content": item.get("keyword", "")}}]},
-                    "지역명": {"rich_text": [{"text": {"content": item["addr"]}}]},
+                    "지역명": {"rich_text": [{"text": {"content": item.get("addr", "")}}]},
                     "가격":   {"number": price_num},
-                    "링크":   {"url": item["link"]},
+                    "링크":   {"url": item.get("link", "")},
                 },
             },
             timeout=10,
@@ -135,6 +141,16 @@ def get_tids_by_region(region_map, region_keyword):
     return sorted(int(t) for t, name in region_map.items() if kw in name)
 
 
+def apply_chunk(tids, chunk):
+    """chunk='3/20' -> 전체 tids 중 3번째 묶음만 (1-기반, 전국에 고르게 분산)."""
+    if not chunk:
+        return tids
+    i, n = chunk.split("/")
+    i, n = int(i), int(n)
+    return tids[i - 1::n]
+
+
+# ==================== 키워드 매칭 ====================
 def keyword_words(kw):
     """키워드를 단어 단위로 쪼개 정규화. '더블알엘 모자' -> ['더블알엘','모자']"""
     return [w for w in (p.replace(" ", "").lower() for p in kw.split()) if w]
@@ -153,6 +169,16 @@ def _fix(text):
         return text.encode("latin-1").decode("utf-8")
     except Exception:
         return text
+
+
+def parse_region_name(html):
+    """페이지에서 지역명만 가볍게 추출 (map 모드 전용)."""
+    d1 = re.search(r'"depth1RegionName"\s*:\s*"([^"]*)"', html)
+    if not d1:
+        return None
+    d2 = re.search(r'"depth2RegionName"\s*:\s*"([^"]*)"', html)
+    addr = f"{_fix(d1.group(1))} {_fix(d2.group(1) if d2 else '')}".strip()
+    return addr or None
 
 
 def parse_page(html):
@@ -178,8 +204,7 @@ def parse_page(html):
                 price = format(int(float(it.get("price", 0))), ",") + "원"
             except Exception:
                 price = "0원"
-            # 매물 데이터의 href 가 곧 올바른 전체 주소 (/kr/buy-sell/...).
-            # 옛 코드는 id 로 /articles/ 주소를 만들어 링크가 다 깨졌었음.
+            # href 가 곧 올바른 전체 주소 (/kr/buy-sell/...)
             href = it.get("href", "")
             if not href:
                 continue
@@ -192,16 +217,6 @@ def parse_page(html):
         return addr, items
     except Exception:
         return None, []
-
-
-def parse_region_name(html):
-    """페이지에서 지역명만 가볍게 추출 (map 모드 전용 — 무거운 매물 파싱을 건너뛴다)."""
-    d1 = re.search(r'"depth1RegionName"\s*:\s*"([^"]*)"', html)
-    if not d1:
-        return None
-    d2 = re.search(r'"depth2RegionName"\s*:\s*"([^"]*)"', html)
-    addr = f"{_fix(d1.group(1))} {_fix(d2.group(1) if d2 else '')}".strip()
-    return addr or None
 
 
 def fetch_region(tid, keyword=None):
@@ -222,59 +237,103 @@ def fetch_region(tid, keyword=None):
         return None, []
 
 
-# ==================== 모드: watch (알림봇) ====================
-def run_watch():
+# ==================== 요약문 ====================
+def build_summary(title_line, items):
+    """매물 목록으로 텔레그램 요약문을 만든다."""
+    prices = []
+    for it in items:
+        digits = "".join(ch for ch in it.get("price", "") if ch.isdigit())
+        if digits and int(digits) > 0:
+            prices.append(int(digits))
+    prov = {}
+    for it in items:
+        if it.get("addr"):
+            p = it["addr"].split()[0]
+            prov[p] = prov.get(p, 0) + 1
+    top = sorted(prov.items(), key=lambda x: -x[1])[:6]
+
+    msg = f"{title_line}\n━━━━━━━━━━━━\n✅ 총 {len(items)}건\n"
+    if prices:
+        msg += f"💰 {min(prices):,} ~ {max(prices):,}원 (평균 {sum(prices)//len(prices):,}원)\n"
+    if top:
+        msg += "📍 " + " / ".join(f"{k} {v}" for k, v in top) + "\n"
+    msg += "\n📋 전체 목록 → 노션 DB"
+    return msg
+
+
+# ==================== 모드: watch (알림봇 갈래 워커) ====================
+def run_watch(chunk=None, out=None):
     region_map = load_json(REGION_MAP_FILE, {})
     if not region_map:
-        send_telegram("❌ 알림봇: region_map.json 이 비어 있습니다.\n먼저 '지역코드 수집' 워크플로우를 한 번 실행하세요.")
-        sys.exit(1)
+        if out:
+            save_json(out, []); print("[watch] region_map 비어있음"); return
+        send_telegram("❌ 알림봇: region_map.json 이 비어 있습니다."); sys.exit(1)
 
     keywords = load_json(KEYWORDS_FILE, [])
     if not keywords:
-        send_telegram("⚠️ 알림봇: keywords.json 에 키워드가 없습니다.")
-        sys.exit(0)
+        if out:
+            save_json(out, []); print("[watch] 키워드 없음"); return
+        send_telegram("⚠️ 알림봇: keywords.json 에 키워드가 없습니다."); sys.exit(0)
 
     seen = load_json(SEEN_FILE, {})
-    first_run = len(seen) == 0   # 첫 실행이면 알림 도배를 막기 위해 조용히 기록만 한다
-
-    tids = sorted(int(t) for t in region_map.keys())
+    tids = apply_chunk(sorted(int(t) for t in region_map.keys()), chunk)
     norm_keywords = [(k, keyword_words(k)) for k in keywords]
-    today = datetime.date.today().isoformat()
+    print(f"[watch] chunk={chunk or '전체'} / 지역 {len(tids)}개 / 키워드 {keywords}")
 
-    print(f"[watch] 키워드 {keywords} / 지역 {len(tids)}개 / 첫실행={first_run}")
-
-    new_items = []
-    done = 0
+    new_items, done = [], 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = [ex.submit(fetch_region, tid) for tid in tids]
         for fut in as_completed(futures):
             done += 1
-            if done % 200 == 0:
-                print(f"  진행 {done}/{len(tids)} ... 신규 {len(new_items)}건")
+            if done % 100 == 0:
+                print(f"  진행 {done}/{len(tids)} ... 신규후보 {len(new_items)}건")
             _, articles = fut.result()
             for art in articles:
                 if not art["link"] or art["link"] in seen:
                     continue
                 for kw, words in norm_keywords:
                     if title_matches(art["title"], words):
-                        seen[art["link"]] = today
                         art["keyword"] = kw
                         new_items.append(art)
                         break
 
+    if out:
+        save_json(out, new_items)
+        print(f"[watch] chunk {chunk} — 신규후보 {len(new_items)}건 기록 ({out})")
+        return
+
+    # 단일 실행 모드 (로컬·수동용)
+    deliver_watch(new_items, seen)
+
+
+def deliver_watch(new_items, seen):
+    """새 매물 후보를 받아 텔레그램·노션 전달 + seen.json 갱신·커밋용 저장."""
+    # 링크 기준 중복 제거
+    uniq = {}
+    for it in new_items:
+        if it.get("link"):
+            uniq[it["link"]] = it
+    new_items = list(uniq.values())
+
+    first_run = len(seen) == 0
+    today = datetime.date.today().isoformat()
+    fresh = [it for it in new_items if it["link"] not in seen]
+    for it in fresh:
+        seen[it["link"]] = today
     prune_seen(seen)
     save_json(SEEN_FILE, seen)
 
     if first_run:
-        send_telegram(f"🥕 알림봇 가동 시작!\n현재 매물 {len(new_items)}건을 기록했습니다.\n다음 실행부터 '새 매물'만 알려드립니다.")
-        print(f"[watch] 첫 실행 — {len(new_items)}건 기록만 함 (알림 생략)")
+        send_telegram(f"🥕 알림봇 가동 시작!\n현재 매물 {len(fresh)}건을 기록했습니다.\n다음 실행부터 '새 매물'만 알려드립니다.")
+        print(f"[watch] 첫 실행 — {len(fresh)}건 기록만 (알림 생략)")
         return
 
-    for it in new_items:
+    for it in fresh:
         send_item(it)
-    if new_items:
-        send_telegram(f"🥕 알림봇: 새 매물 {len(new_items)}건 발견 ({', '.join(keywords)})")
-    print(f"[watch] 완료 — 새 매물 {len(new_items)}건")
+    if fresh:
+        kws = ", ".join(sorted(set(it.get("keyword", "") for it in fresh)))
+        send_telegram(f"🥕 알림봇: 새 매물 {len(fresh)}건 발견 ({kws})")
+    print(f"[watch] 완료 — 새 매물 {len(fresh)}건")
 
 
 def prune_seen(seen):
@@ -284,47 +343,41 @@ def prune_seen(seen):
         del seen[link]
 
 
-# ==================== 모드: search (즉석검색) ====================
-def run_search(keyword, region):
+# ==================== 모드: search (즉석검색 갈래 워커) ====================
+def run_search(keyword, region, chunk=None, out=None):
     keyword = (keyword or "").strip()
     if not keyword:
-        send_telegram("❌ 즉석검색: 키워드가 비어 있습니다.")
-        sys.exit(1)
+        if out:
+            save_json(out, []); print("[search] 키워드 없음"); return
+        send_telegram("❌ 즉석검색: 키워드가 비어 있습니다."); sys.exit(1)
 
     region_map = load_json(REGION_MAP_FILE, {})
-
     if region and region.strip():
-        tids = []
-        bad  = []
+        tids, bad = [], []
         for r in [x.strip() for x in region.replace(" ", "").split(",") if x.strip()]:
             found = get_tids_by_region(region_map, r)
             (tids.extend(found) if found else bad.append(r))
         tids = sorted(set(tids))
-        if not tids:
-            send_telegram(f"❌ 즉석검색: '{region}' 지역을 찾을 수 없습니다.")
-            sys.exit(1)
         scope = region.strip()
-        if bad:
-            send_telegram(f"⚠️ 즉석검색: '{', '.join(bad)}' 지역은 못 찾아 건너뜁니다.")
     else:
-        if not region_map:
-            send_telegram("❌ 즉석검색: region_map.json 이 비어 있습니다.\n먼저 '지역코드 수집'을 실행하세요.")
-            sys.exit(1)
-        tids  = sorted(int(t) for t in region_map.keys())
+        tids = sorted(int(t) for t in region_map.keys())
         scope = "전국"
 
-    send_telegram(f"🔍 즉석검색 시작\n키워드: {keyword}\n범위: {scope} ({len(tids)}개 지역)")
-    print(f"[search] '{keyword}' / {scope} / {len(tids)}개 지역")
+    if not tids:
+        if out:
+            save_json(out, []); print("[search] 대상 지역 없음"); return
+        send_telegram(f"❌ 즉석검색: '{region}' 지역을 찾을 수 없습니다."); sys.exit(1)
 
+    tids = apply_chunk(tids, chunk)
     kw_words = keyword_words(keyword)
-    results = []
-    seen_fp = set()
-    done = 0
+    print(f"[search] '{keyword}' / {scope} / chunk={chunk or '전체'} / 지역 {len(tids)}개")
+
+    results, seen_fp, done = [], set(), 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = [ex.submit(fetch_region, tid, keyword) for tid in tids]
         for fut in as_completed(futures):
             done += 1
-            if done % 200 == 0:
+            if done % 100 == 0:
                 print(f"  진행 {done}/{len(tids)} ... 발견 {len(results)}건")
             _, articles = fut.result()
             for art in articles:
@@ -336,42 +389,55 @@ def run_search(keyword, region):
                 seen_fp.add(fp)
                 art["keyword"] = keyword
                 results.append(art)
-                push_notion(art)   # 노션 실시간 적재 (찾는 즉시)
 
-    # CSV 저장 (워크플로우가 결과물로 첨부)
-    csv_name = f"검색결과_{keyword.replace(' ', '_')}.csv"
-    with open(csv_name, "w", encoding="utf-8-sig", newline="") as f:
+    if out:
+        save_json(out, results)
+        print(f"[search] chunk {chunk} — {len(results)}건 기록 ({out})")
+        return
+
+    # 단일 실행 모드: 노션 실시간 + CSV + 텔레그램 요약
+    send_telegram(f"🔍 즉석검색 시작\n키워드: {keyword} ({scope})")
+    for it in results:
+        push_notion(it)
+    _write_csv(f"검색결과_{keyword.replace(' ', '_')}.csv", results)
+    send_telegram(build_summary(f"🏁 즉석검색 완료 — {keyword} ({scope})", results))
+    print(f"[search] 완료 — {len(results)}건")
+
+
+def _write_csv(name, items):
+    with open(name, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(["지역", "상품명", "가격", "링크"])
-        for it in results:
-            w.writerow([it["addr"], it["title"], it["price"], it["link"]])
+        for it in items:
+            w.writerow([it.get("addr", ""), it.get("title", ""), it.get("price", ""), it.get("link", "")])
 
-    # 텔레그램은 개별 전송 없이 끝에 요약 1건만 (도배 방지)
-    prices = []
-    for it in results:
-        digits = "".join(ch for ch in it["price"] if ch.isdigit())
-        if digits and int(digits) > 0:
-            prices.append(int(digits))
-    prov = {}
-    for it in results:
-        if it["addr"]:
-            p = it["addr"].split()[0]
-            prov[p] = prov.get(p, 0) + 1
-    top = sorted(prov.items(), key=lambda x: -x[1])[:6]
 
-    summary = (
-        f"🏁 즉석검색 완료\n"
-        f"━━━━━━━━━━━━\n"
-        f"🔍 {keyword} ({scope})\n"
-        f"✅ 총 {len(results)}건 발견\n"
-    )
-    if prices:
-        summary += f"💰 {min(prices):,} ~ {max(prices):,}원 (평균 {sum(prices)//len(prices):,}원)\n"
-    if top:
-        summary += "📍 " + " / ".join(f"{k} {v}" for k, v in top) + "\n"
-    summary += "\n📋 전체 목록 → 노션 DB · CSV"
-    send_telegram(summary)
-    print(f"[search] 완료 — {len(results)}건 (노션 실시간 / 텔레그램 요약)")
+# ==================== 모드: aggregate (갈래 결과 집계·전달) ====================
+def run_aggregate(target, keyword, indir):
+    items = []
+    for root, _, files in os.walk(indir):
+        for fn in files:
+            if fn.endswith(".json"):
+                part = load_json(os.path.join(root, fn), [])
+                if isinstance(part, list):
+                    items.extend(part)
+    # 링크 기준 중복 제거
+    uniq = {}
+    for it in items:
+        if it.get("link"):
+            uniq[it["link"]] = it
+    items = list(uniq.values())
+    print(f"[aggregate] target={target} / 갈래 결과 합계 {len(items)}건")
+
+    if target == "watch":
+        seen = load_json(SEEN_FILE, {})
+        deliver_watch(items, seen)
+    elif target == "search":
+        for it in items:
+            push_notion(it)
+        _write_csv(f"검색결과_{(keyword or 'search').replace(' ', '_')}.csv", items)
+        send_telegram(build_summary(f"🏁 즉석검색 완료 — {keyword}", items))
+        print(f"[aggregate] 검색 {len(items)}건 — 노션·CSV·요약 완료")
 
 
 # ==================== 모드: map (지역코드 수집) ====================
@@ -402,30 +468,39 @@ def run_map():
             if done[0] % 500 == 0:
                 print(f"  진행 {done[0]}/{len(ids)} ... 수집 {len(new_map)}개")
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         list(ex.map(one, ids))
 
     region_map = load_json(REGION_MAP_FILE, {})
     region_map.update(new_map)
     save_json(REGION_MAP_FILE, region_map)
-    send_telegram(f"🗺️ 지역코드 수집 완료\n총 {len(region_map)}개 지역 저장")
+    send_telegram(f"지역코드 수집 완료 — 총 {len(region_map)}개 지역")
     print(f"[map] 완료 — region_map.json 총 {len(region_map)}개")
 
 
 # ==================== 실행 진입점 ====================
 def main():
     parser = argparse.ArgumentParser(description="당근마켓 검색·알림 봇")
-    parser.add_argument("--mode", required=True, choices=["watch", "search", "map"])
-    parser.add_argument("--keyword", default="", help="search 모드의 검색 키워드")
-    parser.add_argument("--region",  default="", help="search 모드의 지역 (비우면 전국)")
+    parser.add_argument("--mode", required=True,
+                        choices=["watch", "search", "map", "aggregate"])
+    parser.add_argument("--keyword", default="", help="search 키워드")
+    parser.add_argument("--region",  default="", help="search 지역 (비우면 전국)")
+    parser.add_argument("--chunk",   default="", help="갈래 i/N (예: 3/20)")
+    parser.add_argument("--out",     default="", help="갈래 결과 기록 파일")
+    parser.add_argument("--target",  default="", choices=["", "watch", "search"],
+                        help="aggregate 대상")
+    parser.add_argument("--indir",   default="results", help="aggregate 입력 폴더")
     args = parser.parse_args()
 
     if args.mode == "watch":
-        run_watch()
+        run_watch(chunk=args.chunk or None, out=args.out or None)
     elif args.mode == "search":
-        run_search(args.keyword, args.region)
+        run_search(args.keyword, args.region,
+                   chunk=args.chunk or None, out=args.out or None)
     elif args.mode == "map":
         run_map()
+    elif args.mode == "aggregate":
+        run_aggregate(args.target, args.keyword, args.indir)
 
 
 if __name__ == "__main__":

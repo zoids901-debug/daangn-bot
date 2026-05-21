@@ -1,46 +1,71 @@
 name: 당근 알림봇 (전국 자동감시)
 
-# 매시 정각(한국시간)마다 자동 실행. 손으로도 실행 가능.
+# 매시 정각마다 자동 실행. 전국을 20갈래로 쪼개 동시에 훑고(차단 회피),
+# 마지막에 한 번 모아서 새 매물만 텔레그램 알림.
 on:
   schedule:
     - cron: '0 * * * *'
   workflow_dispatch:
 
-# 같은 워크플로우가 겹쳐 돌지 않도록
 concurrency:
   group: daangn-watch
   cancel-in-progress: false
 
-# seen.json 을 다시 저장(커밋)하려면 쓰기 권한 필요
 permissions:
   contents: write
 
 jobs:
-  watch:
+  # 1단계: 20갈래가 각자 전국의 1/20씩 맡아 새 매물 후보를 찾는다
+  scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: 라이브러리 설치
         run: pip install -r requirements.txt
+      - name: 갈래 검색 (${{ matrix.chunk }}/20)
+        env:
+          MAX_WORKERS: '2'   # 깃허브 IP 안전 속도
+        run: python daangn_search.py --mode watch --chunk ${{ matrix.chunk }}/20 --out result.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.chunk }}
+          path: result.json
 
-      - name: 전국 키워드 검색
+  # 2단계: 20갈래 결과를 모아 새 매물만 알림 + seen.json 갱신
+  aggregate:
+    needs: scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 라이브러리 설치
+        run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          path: results
+      - name: 집계 · 알림
         env:
           TELEGRAM_TOKEN:     ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-        run: python daangn_search.py --mode watch
-
+        run: python daangn_search.py --mode aggregate --target watch --indir results
       - name: 본 매물 기록 저장
         run: |
           git config user.name  "daangn-bot"
           git config user.email "actions@github.com"
           git add seen.json
           git commit -m "chore: seen.json 갱신" || echo "변경 없음 — 커밋 생략"
+          git pull --rebase --autostash || true
           git push

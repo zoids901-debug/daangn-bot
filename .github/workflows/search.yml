@@ -1,11 +1,12 @@
 name: 당근 즉석검색
 
-# 깃허브 화면에서 'Run workflow' 버튼으로 직접 실행 (키워드 입력)
+# 깃허브 화면에서 Run workflow 로 키워드를 넣어 실행.
+# 전국을 20갈래로 쪼개 동시에 검색하고, 모아서 노션 적재 + 텔레그램 요약.
 on:
   workflow_dispatch:
     inputs:
       keyword:
-        description: '검색할 키워드 (예: 아이폰15)'
+        description: '검색할 키워드 (예: 더블알엘)'
         required: true
       region:
         description: '지역 (비우면 전국. 예: 서울,경기)'
@@ -13,27 +14,56 @@ on:
         default: ''
 
 jobs:
-  search:
+  # 1단계: 20갈래가 각자 1/20씩 맡아 키워드 매물을 찾는다
+  scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: 라이브러리 설치
         run: pip install -r requirements.txt
+      - name: 갈래 검색 (${{ matrix.chunk }}/20)
+        env:
+          MAX_WORKERS: '2'
+        run: >
+          python daangn_search.py --mode search
+          --keyword "${{ inputs.keyword }}"
+          --region "${{ inputs.region }}"
+          --chunk ${{ matrix.chunk }}/20 --out result.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.chunk }}
+          path: result.json
 
-      - name: 즉석검색 실행
+  # 2단계: 결과를 모아 노션 전체 적재 + CSV + 텔레그램 요약
+  aggregate:
+    needs: scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 라이브러리 설치
+        run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          path: results
+      - name: 집계 · 노션 적재 · 요약
         env:
           TELEGRAM_TOKEN:     ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-        run: python daangn_search.py --mode search --keyword "${{ inputs.keyword }}" --region "${{ inputs.region }}"
-
+        run: python daangn_search.py --mode aggregate --target search --keyword "${{ inputs.keyword }}" --indir results
       - name: 검색결과 CSV 첨부
         if: always()
         uses: actions/upload-artifact@v4

@@ -2,6 +2,7 @@ name: 지역코드 수집 (region_map 갱신)
 
 # 매주 월요일 새벽 4시(한국시간) 자동 + 손으로도 실행 가능.
 # 알림봇/즉석검색의 '전국' 범위가 이 region_map.json 을 기준으로 동작한다.
+# 단일 실행이라 차단 안 당하게 천천히(MAX_WORKERS=2) 돈다. 약 70분 소요.
 on:
   schedule:
     - cron: '0 19 * * 0'
@@ -28,6 +29,7 @@ jobs:
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MAX_WORKERS: '2'
         run: python daangn_search.py --mode map
 
       - name: region_map.json 저장
@@ -36,4 +38,5 @@ jobs:
           git config user.email "actions@github.com"
           git add region_map.json
           git commit -m "chore: region_map.json 갱신" || echo "변경 없음 — 커밋 생략"
+          git pull --rebase --autostash || true
           git push
