@@ -191,6 +191,16 @@ def parse_page(html):
         return None, []
 
 
+def parse_region_name(html):
+    """페이지에서 지역명만 가볍게 추출 (map 모드 전용 — 무거운 매물 파싱을 건너뛴다)."""
+    d1 = re.search(r'"depth1RegionName"\s*:\s*"([^"]*)"', html)
+    if not d1:
+        return None
+    d2 = re.search(r'"depth2RegionName"\s*:\s*"([^"]*)"', html)
+    addr = f"{_fix(d1.group(1))} {_fix(d2.group(1) if d2 else '')}".strip()
+    return addr or None
+
+
 def fetch_region(tid, keyword=None):
     """지역 페이지 1개를 가져와 매물 목록을 반환. keyword 를 주면 당근 서버에서 미리 검색."""
     time.sleep(random.uniform(0.4, 1.0))
@@ -355,7 +365,7 @@ def run_map():
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
                 timeout=12,
             )
-            addr, _ = parse_page(res.text)
+            addr = parse_region_name(res.text)
             if addr:
                 with lock:
                     new_map[str(tid)] = addr
