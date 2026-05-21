@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🥕 당근봇 컨트롤</title>
+<style>
+  :root { --orange:#FF6F0F; --bg:#f4f5f7; --card:#fff; --line:#e3e5e8; --muted:#8b8f96; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo",
+         "Malgun Gothic",sans-serif; background:var(--bg); color:#1a1a1a; }
+  .wrap { max-width:520px; margin:0 auto; padding:16px 14px 60px; }
+  h1 { font-size:20px; margin:6px 0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
+          padding:16px; margin-bottom:14px; }
+  .card h2 { font-size:15px; margin:0 0 4px; }
+  .card .desc { font-size:12px; color:var(--muted); margin:0 0 12px; }
+  input { width:100%; padding:11px 12px; border:1px solid var(--line); border-radius:9px;
+          font-size:15px; margin-bottom:8px; }
+  button { background:var(--orange); color:#fff; border:0; border-radius:9px;
+           padding:11px 14px; font-size:14px; font-weight:600; cursor:pointer; width:100%; }
+  button.ghost { background:#fff; color:var(--orange); border:1.5px solid var(--orange); }
+  button.mini { width:auto; padding:5px 10px; font-size:12px; background:#f0f1f3;
+                color:#555; font-weight:500; }
+  button:active { opacity:.7; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .kw { display:flex; align-items:center; justify-content:space-between;
+        padding:9px 12px; background:#fff7f0; border-radius:9px; margin-bottom:7px; }
+  .kw span { font-size:14px; }
+  .kw button { width:26px; height:26px; padding:0; border-radius:50%; background:#ffe0c8;
+               color:var(--orange); font-size:15px; line-height:1; }
+  .run { display:flex; justify-content:space-between; padding:8px 2px;
+         border-bottom:1px solid var(--line); font-size:13px; }
+  .run:last-child { border:0; }
+  .run a { color:#1a1a1a; text-decoration:none; }
+  .t { color:var(--muted); font-size:12px; }
+  #msg { position:fixed; left:50%; bottom:22px; transform:translateX(-50%);
+         background:#1a1a1a; color:#fff; padding:10px 18px; border-radius:22px;
+         font-size:13px; opacity:0; transition:.3s; pointer-events:none; max-width:90%; }
+  #msg.show { opacity:1; }
+  .foot { text-align:center; font-size:12px; color:var(--muted); margin-top:18px; }
+  .foot a { color:var(--orange); }
+  .hide { display:none; }
+  .help { font-size:12px; color:var(--muted); line-height:1.6; }
+  .help a { color:var(--orange); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🥕 당근봇 컨트롤</h1>
+
+  <!-- 연결 -->
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 id="connState" style="margin:0">🔴 연결 필요</h2>
+      <button class="mini" onclick="toggleToken()">설정</button>
+    </div>
+    <div id="tokenBox" class="hide" style="margin-top:12px">
+      <p class="help">
+        깃허브 토큰이 필요합니다 (저장소 조작 권한).
+        <a href="https://github.com/settings/tokens/new?description=daangn-bot&scopes=repo,workflow" target="_blank">
+        여기서 발급</a> → <b>repo</b>·<b>workflow</b> 체크 → 생성된 토큰을 아래에 붙여넣기.
+        토큰은 이 브라우저에만 저장됩니다.
+      </p>
+      <input id="tokenIn" type="password" placeholder="ghp_... 토큰 붙여넣기">
+      <button onclick="saveToken()">저장</button>
+    </div>
+  </div>
+
+  <!-- 감시 키워드 -->
+  <div class="card">
+    <h2>📋 감시 키워드</h2>
+    <p class="desc">알림봇이 매시간 전국에서 찾아 새 매물을 알려줍니다.</p>
+    <div id="kwList"></div>
+    <div class="row" style="margin-top:4px">
+      <input id="kwIn" placeholder="키워드 입력 (예: 더블알엘)" style="margin:0"
+             onkeydown="if(event.key==='Enter')addKw()">
+      <button class="mini" style="padding:11px 14px" onclick="addKw()">추가</button>
+    </div>
+    <button style="margin-top:10px" onclick="saveKw()">💾 키워드 저장</button>
+  </div>
+
+  <!-- 즉석검색 -->
+  <div class="card">
+    <h2>🔍 즉석검색</h2>
+    <p class="desc">키워드를 지금 바로 전국 검색합니다 (~4분 뒤 텔레그램·노션).</p>
+    <input id="searchKw" placeholder="검색 키워드">
+    <input id="searchRegion" placeholder="지역 (비우면 전국. 예: 서울,경기)">
+    <button onclick="runSearch()">검색 실행</button>
+  </div>
+
+  <!-- 작업 현황 -->
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">⚙️ 작업 현황</h2>
+      <button class="mini" onclick="loadRuns()">새로고침</button>
+    </div>
+    <div id="runs" style="margin-top:10px"><p class="t">불러오는 중...</p></div>
+    <button class="ghost" style="margin-top:10px" onclick="runWatch()">지금 알림봇 돌리기</button>
+  </div>
+
+  <div class="foot">
+    <a id="notionLink" href="#" target="_blank">노션 결과 DB</a> ·
+    <a href="https://github.com/zoids901-debug/daangn-bot" target="_blank">저장소</a>
+  </div>
+</div>
+<div id="msg"></div>
+
+<script>
+const REPO = "zoids901-debug/daangn-bot";
+const API  = "https://api.github.com";
+const NOTION = "https://www.notion.so/2e1e69c173cb80129404d7d9951a1ce4";
+let KW = [], kwSha = null;
+
+document.getElementById("notionLink").href = NOTION;
+
+function token(){ return localStorage.getItem("ghtoken") || ""; }
+function toast(t){ const m=document.getElementById("msg"); m.textContent=t;
+  m.classList.add("show"); setTimeout(()=>m.classList.remove("show"),2600); }
+function toggleToken(){ document.getElementById("tokenBox").classList.toggle("hide"); }
+
+function saveToken(){
+  const v = document.getElementById("tokenIn").value.trim();
+  if(!v){ toast("토큰을 입력하세요"); return; }
+  localStorage.setItem("ghtoken", v);
+  document.getElementById("tokenBox").classList.add("hide");
+  refreshConn(); loadKw(); loadRuns();
+  toast("토큰 저장됨");
+}
+function refreshConn(){
+  document.getElementById("connState").textContent =
+    token() ? "🟢 연결됨" : "🔴 연결 필요";
+}
+
+async function gh(method, path, body){
+  const opt = { method, headers:{
+    "Authorization":"Bearer "+token(),
+    "Accept":"application/vnd.github+json" } };
+  if(body) opt.body = JSON.stringify(body);
+  const res = await fetch(API+path, opt);
+  if(res.status===204) return {};
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.message || ("오류 "+res.status));
+  return data;
+}
+function b64encode(s){ return btoa(String.fromCharCode(...new TextEncoder().encode(s))); }
+function b64decode(b){ return new TextDecoder().decode(Uint8Array.from(atob(b),c=>c.charCodeAt(0))); }
+
+// ---- 키워드 ----
+async function loadKw(){
+  if(!token()) return;
+  try{
+    const d = await gh("GET", `/repos/${REPO}/contents/keywords.json`);
+    kwSha = d.sha;
+    KW = JSON.parse(b64decode(d.content));
+    renderKw();
+  }catch(e){ toast("키워드 불러오기 실패: "+e.message); }
+}
+function renderKw(){
+  document.getElementById("kwList").innerHTML = KW.length
+    ? KW.map((k,i)=>`<div class="kw"><span>${k}</span>
+        <button onclick="rmKw(${i})">✕</button></div>`).join("")
+    : `<p class="t">등록된 키워드 없음</p>`;
+}
+function addKw(){
+  const v = document.getElementById("kwIn").value.trim();
+  if(!v) return;
+  if(KW.includes(v)){ toast("이미 있는 키워드"); return; }
+  KW.push(v); document.getElementById("kwIn").value=""; renderKw();
+}
+function rmKw(i){ KW.splice(i,1); renderKw(); }
+async function saveKw(){
+  if(!token()){ toast("먼저 토큰을 설정하세요"); return; }
+  try{
+    await gh("PUT", `/repos/${REPO}/contents/keywords.json`, {
+      message:"keywords.json 갱신 (컨트롤 패널)",
+      content: b64encode(JSON.stringify(KW,null,2)+"\n"),
+      sha: kwSha });
+    toast("키워드 저장 완료 ✅");
+    loadKw();
+  }catch(e){ toast("저장 실패: "+e.message); }
+}
+
+// ---- 즉석검색 ----
+async function runSearch(){
+  if(!token()){ toast("먼저 토큰을 설정하세요"); return; }
+  const kw = document.getElementById("searchKw").value.trim();
+  if(!kw){ toast("검색 키워드를 입력하세요"); return; }
+  const region = document.getElementById("searchRegion").value.trim();
+  try{
+    await gh("POST", `/repos/${REPO}/actions/workflows/search.yml/dispatches`, {
+      ref:"main", inputs:{ keyword:kw, region:region } });
+    toast("검색 시작 ✅ ~4분 뒤 텔레그램·노션");
+    setTimeout(loadRuns, 3000);
+  }catch(e){ toast("검색 실행 실패: "+e.message); }
+}
+async function runWatch(){
+  if(!token()){ toast("먼저 토큰을 설정하세요"); return; }
+  try{
+    await gh("POST", `/repos/${REPO}/actions/workflows/watch.yml/dispatches`, {ref:"main"});
+    toast("알림봇 시작 ✅");
+    setTimeout(loadRuns, 3000);
+  }catch(e){ toast("실행 실패: "+e.message); }
+}
+
+// ---- 작업 현황 ----
+function ago(iso){
+  const s = (Date.now()-new Date(iso))/1000;
+  if(s<60) return "방금";
+  if(s<3600) return Math.floor(s/60)+"분 전";
+  if(s<86400) return Math.floor(s/3600)+"시간 전";
+  return Math.floor(s/86400)+"일 전";
+}
+async function loadRuns(){
+  if(!token()) return;
+  try{
+    const d = await gh("GET", `/repos/${REPO}/actions/runs?per_page=8`);
+    document.getElementById("runs").innerHTML = d.workflow_runs.map(r=>{
+      let icon = r.status==="completed"
+        ? (r.conclusion==="success"?"✅":"❌")
+        : (r.status==="queued"?"⚪":"🟡");
+      return `<div class="run"><a href="${r.html_url}" target="_blank">${icon} ${r.name}</a>
+              <span class="t">${ago(r.created_at)}</span></div>`;
+    }).join("") || `<p class="t">실행 기록 없음</p>`;
+  }catch(e){ document.getElementById("runs").innerHTML =
+      `<p class="t">불러오기 실패: ${e.message}</p>`; }
+}
+
+// ---- 시작 ----
+refreshConn();
+if(token()){ loadKw(); loadRuns(); }
+else { document.getElementById("tokenBox").classList.remove("hide"); }
+</script>
+</body>
+</html>
