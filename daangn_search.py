@@ -32,6 +32,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
+# 윈도우 콘솔(cp949)에서 이모지/특수문자 출력 시 크래시 방지
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 # ==================== 설정 ====================
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID         = os.environ.get("TELEGRAM_CHAT_ID", "")
