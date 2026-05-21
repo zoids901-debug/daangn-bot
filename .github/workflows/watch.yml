@@ -1,10 +1,11 @@
-name: 당근 알림봇 (전국 자동감시)
+name: 당근 알림봇 (주간 전국 감시)
 
-# 한국시간 오전 9시~밤 10시 매시간 자동 실행 (밤 10시~오전 9시는 쉼).
-# 자는 동안 올라온 매물은 오전 9시 실행분이 한 번에 모아서 알림.
+# 매주 월요일 새벽(한국시간) 1회 자동 실행.
+# 단일 실행 + 느린 안전속도 — 한 번에 하나만 도니 당근에 차단되지 않는다.
+# 지난 한 주 동안 올라온 새 매물을 모아서 텔레그램 알림.
 on:
   schedule:
-    - cron: '0 0-13 * * *'   # 00:00~13:00 UTC = 한국시간 09:00~22:00 매시간
+    - cron: '0 21 * * 0'   # 월요일 06:00 KST
   workflow_dispatch:
 
 concurrency:
@@ -15,14 +16,9 @@ permissions:
   contents: write
 
 jobs:
-  # 1단계: 20갈래가 각자 전국의 1/20씩 맡아 새 매물 후보를 찾는다
-  scan:
+  watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        chunk: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,37 +26,14 @@ jobs:
           python-version: '3.12'
       - name: 라이브러리 설치
         run: pip install -r requirements.txt
-      - name: 갈래 검색 (${{ matrix.chunk }}/20)
-        env:
-          MAX_WORKERS: '2'   # 깃허브 IP 안전 속도
-        run: python daangn_search.py --mode watch --chunk ${{ matrix.chunk }}/20 --out result.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: chunk-${{ matrix.chunk }}
-          path: result.json
-
-  # 2단계: 20갈래 결과를 모아 새 매물만 알림 + seen.json 갱신
-  aggregate:
-    needs: scan
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: 라이브러리 설치
-        run: pip install -r requirements.txt
-      - uses: actions/download-artifact@v4
-        with:
-          path: results
-      - name: 집계 · 알림
+      - name: 전국 감시
         env:
           TELEGRAM_TOKEN:     ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-        run: python daangn_search.py --mode aggregate --target watch --indir results
+          MAX_WORKERS: '2'   # 차단 안 당하는 안전 속도
+        run: python daangn_search.py --mode watch
       - name: 본 매물 기록 저장
         run: |
           git config user.name  "daangn-bot"

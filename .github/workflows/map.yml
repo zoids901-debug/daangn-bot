@@ -1,25 +1,19 @@
 name: 지역코드 수집 (region_map 갱신)
 
-# 매주 월요일 새벽 4시(한국시간) 자동 + 손으로도 실행 가능.
-# 전국 지역코드(1~8500)를 20갈래로 쪼개 동시 수집 → 약 8분.
-# 알림봇/즉석검색의 '전국' 범위가 이 region_map.json 을 기준으로 동작한다.
+# 매주 월요일 새벽(한국시간) 자동 + 손으로도 실행 가능.
+# 단일 실행 + 느린 안전속도 — 전국 8500개라 약 3시간. 주1회라 느려도 무방.
 on:
   schedule:
-    - cron: '0 19 * * 0'
+    - cron: '0 19 * * 0'   # 월요일 04:00 KST (알림봇보다 먼저)
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  # 1단계: 20갈래가 각자 지역코드의 1/20씩 수집
-  scan:
+  map:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        chunk: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,35 +21,12 @@ jobs:
           python-version: '3.12'
       - name: 라이브러리 설치
         run: pip install -r requirements.txt
-      - name: 갈래 수집 (${{ matrix.chunk }}/20)
-        env:
-          MAX_WORKERS: '2'
-        run: python daangn_search.py --mode map --chunk ${{ matrix.chunk }}/20 --out result.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: chunk-${{ matrix.chunk }}
-          path: result.json
-
-  # 2단계: 20갈래 결과를 합쳐 region_map.json 갱신
-  aggregate:
-    needs: scan
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: 라이브러리 설치
-        run: pip install -r requirements.txt
-      - uses: actions/download-artifact@v4
-        with:
-          path: results
-      - name: 집계
+      - name: 전국 지역코드 수집
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python daangn_search.py --mode aggregate --target map --indir results
+          MAX_WORKERS: '2'
+        run: python daangn_search.py --mode map
       - name: region_map.json 저장
         run: |
           git config user.name  "daangn-bot"
