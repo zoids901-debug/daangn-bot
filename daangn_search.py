@@ -52,6 +52,10 @@ SEEN_TTL_DAYS   = 30
 # 동시 요청 수. 깃허브 IP 안전선은 측정상 2 (초당 ~1회). 환경변수로 덮어쓸 수 있다.
 MAX_WORKERS     = int(os.environ.get("MAX_WORKERS", "4"))
 SEND_DELAY      = 0.4   # 텔레그램 메시지 간격(초)
+# 지역 요청마다 넣는 랜덤 대기(초). 기본은 클라우드(깃허브) 안전값이 크고,
+# 집 IP 로컬 급속검색은 FETCH_DELAY_MIN/MAX 환경변수로 확 줄여 빠르게 돌린다.
+FETCH_MIN       = float(os.environ.get("FETCH_DELAY_MIN", "0.4"))
+FETCH_MAX       = float(os.environ.get("FETCH_DELAY_MAX", "1.0"))
 
 REGION_ALIASES = {
     "전라도": "전라", "경상도": "경상", "충청도": "충청", "강원도": "강원",
@@ -82,6 +86,37 @@ def send_telegram(msg):
         print(f"[텔레그램 오류] {e}")
 
 
+def send_telegram_id(msg):
+    """메시지를 보내고 message_id를 돌려준다(진행율 제자리 갱신용). 실패시 None."""
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return None
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": msg, "disable_web_page_preview": True},
+            timeout=10,
+        )
+        return r.json().get("result", {}).get("message_id")
+    except Exception as e:
+        print(f"[텔레그램 오류] {e}")
+        return None
+
+
+def edit_telegram(msg_id, msg):
+    """진행율 메시지를 제자리 갱신(editMessageText). msg_id 없거나 실패하면 조용히 넘어감."""
+    if not (TELEGRAM_TOKEN and CHAT_ID and msg_id):
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
+            json={"chat_id": CHAT_ID, "message_id": msg_id, "text": msg,
+                  "disable_web_page_preview": True},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def send_item(item):
     """매물 1건을 텔레그램으로 전송 (+ 노션 적재)."""
     kw = f" ({item['keyword']})" if item.get("keyword") else ""
@@ -97,32 +132,39 @@ def send_item(item):
 
 # ==================== 노션 ====================
 def push_notion(item):
-    """노션 DB에 매물 1건 기록. 토큰/DB가 없으면 조용히 건너뛴다."""
+    """노션 DB에 매물 1건 기록. 토큰/DB가 없으면 조용히 건너뛴다.
+    일시적 SSL/네트워크 오류로 유실되지 않게 최대 3회 재시도한다."""
     if not NOTION_TOKEN or not NOTION_DATABASE:
         return
-    try:
-        price_num = int(re.sub(r"[^\d]", "", item.get("price", "")) or 0)
-        requests.post(
-            "https://api.notion.com/v1/pages",
-            headers={
-                "Authorization": f"Bearer {NOTION_TOKEN}",
-                "Notion-Version": "2022-06-28",
-                "Content-Type": "application/json",
-            },
-            json={
-                "parent": {"database_id": NOTION_DATABASE},
-                "properties": {
-                    "상품명": {"title":     [{"text": {"content": item.get("title", "")[:100]}}]},
-                    "검색어": {"rich_text": [{"text": {"content": item.get("keyword", "")}}]},
-                    "지역명": {"rich_text": [{"text": {"content": item.get("addr", "")}}]},
-                    "가격":   {"number": price_num},
-                    "링크":   {"url": item.get("link", "")},
-                },
-            },
-            timeout=10,
-        )
-    except Exception as e:
-        print(f"[노션 오류] {e}")
+    price_num = int(re.sub(r"[^\d]", "", item.get("price", "")) or 0)
+    payload = {
+        "parent": {"database_id": NOTION_DATABASE},
+        "properties": {
+            "상품명": {"title":     [{"text": {"content": item.get("title", "")[:100]}}]},
+            "검색어": {"rich_text": [{"text": {"content": item.get("keyword", "")}}]},
+            "지역명": {"rich_text": [{"text": {"content": item.get("addr", "")}}]},
+            "가격":   {"number": price_num},
+            "링크":   {"url": item.get("link", "")},
+        },
+    }
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+    for attempt in range(3):
+        try:
+            r = requests.post("https://api.notion.com/v1/pages",
+                              headers=headers, json=payload, timeout=10)
+            if r.status_code == 200:
+                return
+            if 400 <= r.status_code < 500:      # 잘못된 요청은 재시도해도 소용없음
+                print(f"[노션 실패 {r.status_code}] {r.text[:150]}")
+                return
+        except Exception as e:
+            last = e
+        time.sleep(1.5 * (attempt + 1))         # 1.5s → 3s 백오프 후 재시도
+    print(f"[노션 오류] 3회 재시도 실패: {item.get('title','')[:40]}")
 
 
 # ==================== 파일 입출력 ====================
@@ -225,9 +267,14 @@ def parse_page(html):
         return None, []
 
 
+BLOCK_HITS = 0   # 403 차단 누적(전역). run_search가 이 값으로 차단 여부를 감지한다.
+
+
 def fetch_region(tid, keyword=None):
-    """지역 페이지 1개를 가져와 매물 목록을 반환. keyword 를 주면 당근 서버에서 미리 검색."""
-    time.sleep(random.uniform(0.4, 1.0))
+    """지역 페이지 1개를 가져와 매물 목록을 반환. keyword 를 주면 당근 서버에서 미리 검색.
+    403(차단) 응답은 조용히 빈손 처리하지 않고 BLOCK_HITS로 집계한다(무효 검색 방지)."""
+    global BLOCK_HITS
+    time.sleep(random.uniform(FETCH_MIN, FETCH_MAX))
     params = {"in": tid}
     if keyword:
         params["search"] = keyword
@@ -238,6 +285,10 @@ def fetch_region(tid, keyword=None):
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
             timeout=12,
         )
+        if res.status_code == 403:
+            BLOCK_HITS += 1
+            time.sleep(1.0)          # 차단 감지 시 잠깐 물러서 IP 부담을 던다
+            return None, []
         return parse_page(res.text)
     except Exception:
         return None, []
@@ -379,13 +430,42 @@ def run_search(keyword, region, chunk=None, out=None):
     print(f"[search] '{keyword}' / {scope} / chunk={chunk or '전체'} / 지역 {len(tids)}개")
 
     results, seen_fp, done = [], set(), 0
+    total = len(tids)
+    single = not out          # 단발 실행(로컬/텔레그램 즉석검색) 여부
+    csv_f = csv_w = None
+    prog_id = None
+    t0 = time.time()
+    if single:
+        # 발견 즉시 노션+CSV에 쏘는 실시간 모드: 중간에 끊겨도 이미 찾은 건 보존된다.
+        send_telegram(f"🔍 즉석검색 시작\n키워드: {keyword} ({scope})")
+        prog_id = send_telegram_id(f"📡 검색 진행율 0% (0/{total})\n✅ 발견 0건 · 남은시간 계산 중...")
+        csv_f = open(f"검색결과_{keyword.replace(' ', '_')}.csv", "w", encoding="utf-8-sig", newline="")
+        csv_w = csv.writer(csv_f)
+        csv_w.writerow(["지역", "상품명", "가격", "링크"])
+        csv_f.flush()
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = [ex.submit(fetch_region, tid, keyword) for tid in tids]
         for fut in as_completed(futures):
             done += 1
             if done % 100 == 0:
-                print(f"  진행 {done}/{len(tids)} ... 발견 {len(results)}건")
-            _, articles = fut.result()
+                blk = f" · ⚠️차단 {BLOCK_HITS}건" if BLOCK_HITS else ""
+                print(f"  진행 {done}/{total} ... 발견 {len(results)}건{blk}", flush=True)
+                # 차단(403)이 30% 넘으면 검색이 사실상 무효 → 텔레그램으로 경고
+                if single and BLOCK_HITS >= 100 and BLOCK_HITS > done * 0.3:
+                    edit_telegram(prog_id, f"⛔ 당근 IP 차단 감지 ({BLOCK_HITS}/{done}) — 결과 불완전. "
+                                           f"10~30분 뒤 재시도 권장")
+            # 진행율 텔레그램 제자리 갱신(500개마다 = 전국 기준 약 17번). 도배 방지.
+            if single and done % 500 == 0:
+                pct = done * 100 // total
+                el = time.time() - t0
+                eta = int((total - done) / done * el / 60) if done else 0
+                edit_telegram(prog_id, f"📡 검색 진행율 {pct}% ({done}/{total})\n"
+                                       f"✅ 발견 {len(results)}건 · 남은시간 약 {eta}분")
+            try:
+                _, articles = fut.result()
+            except Exception:
+                continue
             for art in articles:
                 if not title_matches(art["title"], kw_words):
                     continue
@@ -395,17 +475,22 @@ def run_search(keyword, region, chunk=None, out=None):
                 seen_fp.add(fp)
                 art["keyword"] = keyword
                 results.append(art)
+                if single:
+                    push_notion(art)                       # 발견 즉시 노션 적재
+                    csv_w.writerow([art.get("addr", ""), art.get("title", ""),
+                                    art.get("price", ""), art.get("link", "")])
+                    csv_f.flush()                          # 즉시 디스크 반영(중단 대비)
+                    print(f"★ 발견[{len(results)}] {art.get('addr','')} | "
+                          f"{art.get('title','')} | {art.get('price','')} | {art.get('link','')}", flush=True)
 
     if out:
         save_json(out, results)
         print(f"[search] chunk {chunk} — {len(results)}건 기록 ({out})")
         return
 
-    # 단일 실행 모드: 노션 실시간 + CSV + 텔레그램 요약
-    send_telegram(f"🔍 즉석검색 시작\n키워드: {keyword} ({scope})")
-    for it in results:
-        push_notion(it)
-    _write_csv(f"검색결과_{keyword.replace(' ', '_')}.csv", results)
+    # 단일 실행 마무리: CSV 닫고 진행율 100%로 마감 + 텔레그램 요약 (노션은 실시간 적재 완료)
+    csv_f.close()
+    edit_telegram(prog_id, f"📡 검색 진행율 100% ({total}/{total})\n✅ 발견 {len(results)}건 · 완료")
     send_telegram(build_summary(f"🏁 즉석검색 완료 — {keyword} ({scope})", results))
     print(f"[search] 완료 — {len(results)}건")
 
