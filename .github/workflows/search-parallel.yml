@@ -1,0 +1,99 @@
+name: 당근 병렬 즉석검색 (전국 ~10분)
+
+# 전국을 N갈래로 쪼개 N개의 러너에서 "동시에" 검색한다.
+# 러너마다 IP가 달라서, 한 IP당 요청량이 1/N로 줄어 당근 차단(속도제한)에 안 걸린다.
+# → 단일 실행(2~3시간)이 아니라 ~10분에 전국 완주.
+#
+# 흐름:
+#   prepare  : 입력 chunks(기본 20) 로 matrix [1..N] 생성
+#   search   : matrix 갈래마다 --chunk i/N --out results/chunk-i.json (알림 억제, 파일만 저장)
+#   aggregate: 모든 갈래 결과를 내려받아 링크 기준 중복제거 → 노션 + CSV + 텔레그램 요약 1회
+#
+# daangn-bot 은 공개 repo 라 GitHub Actions 무료 무제한.
+
+on:
+  workflow_dispatch:
+    inputs:
+      keyword:
+        description: '검색할 키워드 (예: 더블알엘 V60)'
+        required: true
+      chunks:
+        description: '갈래 수 = 동시 IP 수 (기본 20, 무료 동시실행 상한). 더 잘게 쪼갤수록 갈래당 빨라짐'
+        required: false
+        default: '20'
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 0) 입력 chunks 로 [1,2,...,N] matrix 생성 ──
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        run: |
+          N='${{ inputs.chunks }}'
+          echo "matrix=$(python3 -c "import json;print(json.dumps(list(range(1,int('$N')+1))))")" >> "$GITHUB_OUTPUT"
+
+  # ── 1) 갈래별 병렬 검색 (IP 서로 다름) ──
+  search:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false           # 한 갈래가 실패해도 나머지는 계속
+      max-parallel: 20           # 무료 동시실행 상한
+      matrix:
+        i: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: 갈래 ${{ matrix.i }} 검색
+        env:
+          MAX_WORKERS: '4'       # 갈래별 IP가 신선하고 요청량이 적어(~425지역) 4워커 안전. 차단 보이면 2~3으로
+        run: |
+          mkdir -p results
+          python daangn_search.py --mode search \
+            --keyword "${{ inputs.keyword }}" \
+            --chunk ${{ matrix.i }}/${{ inputs.chunks }} \
+            --out results/chunk-${{ matrix.i }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.i }}
+          path: results/chunk-${{ matrix.i }}.json
+          if-no-files-found: warn
+
+  # ── 2) 갈래 합치기 → 노션·CSV·텔레그램 (일부 갈래 실패해도 실행) ──
+  aggregate:
+    needs: search
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          path: results
+          pattern: chunk-*
+          merge-multiple: true
+      - name: 합치기·전달
+        env:
+          TELEGRAM_TOKEN:     ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: |
+          python daangn_search.py --mode aggregate --target search \
+            --keyword "${{ inputs.keyword }}" --indir results
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 검색결과CSV
+          path: '*.csv'
+          if-no-files-found: ignore
