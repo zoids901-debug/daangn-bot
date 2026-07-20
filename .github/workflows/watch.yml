@@ -1,44 +1,101 @@
-name: 당근 알림봇 (주간 전국 감시)
+name: 당근 알림봇 (주간 전국 감시, 병렬)
 
-# 매주 월요일 새벽(한국시간) 1회 자동 실행.
-# 단일 실행 + 느린 안전속도 — 한 번에 하나만 도니 당근에 차단되지 않는다.
-# 지난 한 주 동안 올라온 새 매물을 모아서 텔레그램 알림.
+# 매주 월요일 새벽(KST) 1회 자동 실행 + 수동 실행.
+# 전국을 N갈래로 쪼개 N개 러너(IP 다름)에서 동시 감시 → 몇 분 만에 완주(예전 단일=2~3시간).
+# 갈래는 '아직 안 알린 신규 후보'만 파일로 저장하고, aggregate가 모아서
+#   링크 중복제거 → 텔레그램 알림 → seen.json(이미 알린 목록) 갱신·커밋.
+#
+# daangn-bot 은 공개 repo 라 GitHub Actions 무료 무제한.
+
 on:
   schedule:
     - cron: '0 21 * * 0'   # 월요일 06:00 KST
   workflow_dispatch:
+    inputs:
+      chunks:
+        description: '갈래 수 = 동시 IP 수 (기본 20)'
+        required: false
+        default: '20'
 
 concurrency:
-  group: daangn-watch
+  group: daangn-watch          # seen.json 커밋 충돌 방지 — 동시에 하나만
   cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
-  watch:
+  # ── 0) 갈래 수 → matrix [1..N] (스케줄 실행은 입력이 없으니 기본 20) ──
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      n: ${{ steps.gen.outputs.n }}
+    steps:
+      - id: gen
+        run: |
+          N='${{ github.event.inputs.chunks }}'
+          N=${N:-20}
+          echo "n=$N" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(python3 -c "import json;print(json.dumps(list(range(1,int('$N')+1))))")" >> "$GITHUB_OUTPUT"
+
+  # ── 1) 갈래별 병렬 감시 (IP 서로 다름, 알림 억제·파일만 저장) ──
+  watch:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        i: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: 라이브러리 설치
-        run: pip install -r requirements.txt
-      - name: 전국 감시
+      - run: pip install -r requirements.txt
+      - name: 갈래 ${{ matrix.i }} 감시
+        env:
+          MAX_WORKERS: '4'     # 신선 IP + 갈래당 요청 적어 4워커 안전. 차단 보이면 2~3
+        run: |
+          mkdir -p results
+          python daangn_search.py --mode watch \
+            --chunk ${{ matrix.i }}/${{ needs.prepare.outputs.n }} \
+            --out results/chunk-${{ matrix.i }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.i }}
+          path: results/chunk-${{ matrix.i }}.json
+          if-no-files-found: warn
+
+  # ── 2) 합치기 → 텔레그램 알림 + seen.json 갱신·커밋 ──
+  aggregate:
+    needs: watch
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          path: results
+          pattern: chunk-*
+          merge-multiple: true
+      - name: 합치기·알림 (seen.json 갱신)
         env:
           TELEGRAM_TOKEN:     ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           NOTION_TOKEN:       ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          MAX_WORKERS: '2'   # 차단 안 당하는 안전 속도
-        run: python daangn_search.py --mode watch
-      - name: 본 매물 기록 저장
+        run: python daangn_search.py --mode aggregate --target watch --indir results
+      - name: seen.json 커밋
         run: |
           git config user.name  "daangn-bot"
           git config user.email "actions@github.com"
           git add seen.json
-          git commit -m "chore: seen.json 갱신" || echo "변경 없음 — 커밋 생략"
+          git commit -m "chore: seen.json 갱신 (병렬 watch)" || echo "변경 없음 — 커밋 생략"
           git pull --rebase --autostash || true
           git push
