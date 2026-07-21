@@ -15,12 +15,11 @@ export default {
         await sendMsg(env, chatId,
           "🥕 당근 검색봇\n\n" +
           "사용법:\n" +
-          "  검색 키워드            — 전국\n" +
-          "  검색 키워드 지역       — 지정 지역\n" +
+          "  검색 키워드            — 전국 (병렬, ~10분)\n" +
+          "  검색 키워드 지역       — 지정 지역 (빠름)\n" +
           "  검색 더블알엘 광주     — 예시\n\n" +
           "(앞에 / 를 붙여 /검색 으로 써도 됩니다)\n" +
-          "검색 끝나면 새 매물만 알림.\n" +
-          "지역 비우면 전국 (2~3시간 걸림)."
+          "검색 끝나면 새 매물만 알림."
         );
         return new Response("OK");
       }
@@ -31,8 +30,21 @@ export default {
       const keyword = m[1];
       const region = (m[2] || "").trim();
 
+      // 지역 있으면 단일 실행(search.yml, 지역은 범위가 작아 빠름).
+      // 지역 없으면 전국 = 병렬(search-parallel.yml, 20갈래 ~10분).
+      let workflow, inputs, eta;
+      if (region) {
+        workflow = "search.yml";
+        inputs = { keyword, region };
+        eta = "";
+      } else {
+        workflow = "search-parallel.yml";
+        inputs = { keyword };   // chunks 는 워크플로 기본값 20
+        eta = "\n※ 전국 병렬검색 — ~10분 걸려요.";
+      }
+
       const resp = await fetch(
-        `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/search.yml/dispatches`,
+        `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/${workflow}/dispatches`,
         {
           method: "POST",
           headers: {
@@ -42,7 +54,7 @@ export default {
             "X-GitHub-Api-Version": "2022-11-28",
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ ref: "main", inputs: { keyword, region } }),
+          body: JSON.stringify({ ref: "main", inputs }),
         }
       );
 
@@ -51,8 +63,7 @@ export default {
           `🔍 검색 시작\n` +
           `  키워드: ${keyword}\n` +
           `  지역: ${region || "전국"}\n\n` +
-          `끝나면 결과 알림.` +
-          (region ? "" : "\n※ 전국은 2~3시간 걸려요.")
+          `끝나면 결과 알림.` + eta
         );
       } else {
         const err = (await resp.text()).slice(0, 300);
