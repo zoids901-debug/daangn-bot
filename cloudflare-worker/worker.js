@@ -15,20 +15,36 @@ export default {
         await sendMsg(env, chatId,
           "🥕 당근 검색봇\n\n" +
           "사용법:\n" +
-          "  검색 키워드            — 전국 (병렬, ~10분)\n" +
-          "  검색 키워드 지역       — 지정 지역 (빠름)\n" +
-          "  검색 더블알엘 광주     — 예시\n\n" +
+          "  검색 키워드              — 전국 (병렬, ~10분)\n" +
+          "  검색 키워드/지역         — 지정 지역\n" +
+          "  검색 더블알엘 모자/서울  — 예시\n\n" +
+          "※ 지역은 반드시 / 뒤에 붙이세요.\n" +
+          "   / 가 없으면 전부 키워드로 봅니다 (키워드 띄어쓰기 OK).\n" +
           "(앞에 / 를 붙여 /검색 으로 써도 됩니다)\n" +
           "검색 끝나면 새 매물만 알림."
         );
         return new Response("OK");
       }
 
-      const m = text.trim().match(/^\/?(?:검색|search)\s+(\S+)(?:\s+(.+))?$/);
-      if (!m) return new Response("OK");
+      // "검색"/"/검색"/"search"/"/search" 뒤의 인자 전체를 뽑는다.
+      const am = text.trim().match(/^\/?(?:검색|search)\s+([\s\S]+)$/);
+      if (!am) return new Response("OK");
+      const argStr = am[1].trim();
 
-      const keyword = m[1];
-      const region = (m[2] || "").trim();
+      // 키워드와 지역은 '/' 로 구분한다.
+      // 키워드에 공백이 있을 수 있어서(예: "더블알엘 모자") 공백 분리는 쓰지 않는다.
+      //   검색 더블알엘 모자            → keyword="더블알엘 모자", 전국
+      //   검색 더블알엘 모자/서울       → keyword="더블알엘 모자", region="서울"
+      let keyword, region;
+      const sl = argStr.indexOf("/");
+      if (sl >= 0) {
+        keyword = argStr.slice(0, sl).trim();
+        region = argStr.slice(sl + 1).trim();
+      } else {
+        keyword = argStr;
+        region = "";
+      }
+      if (!keyword) return new Response("OK");
 
       // 지역 있으면 단일 실행(search.yml, 지역은 범위가 작아 빠름).
       // 지역 없으면 전국 = 병렬(search-parallel.yml, 20갈래 ~10분).
