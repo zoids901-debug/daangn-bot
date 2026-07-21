@@ -267,31 +267,42 @@ def parse_page(html):
         return None, []
 
 
-BLOCK_HITS = 0   # 403 차단 누적(전역). run_search가 이 값으로 차단 여부를 감지한다.
+BLOCK_HITS = 0     # 403 차단 누적(전역)
+TIMEOUT_HITS = 0   # 타임아웃·네트워크 오류 누적(전역) — 병렬 갈래의 '조용한 누락' 감지용
 
 
 def fetch_region(tid, keyword=None):
     """지역 페이지 1개를 가져와 매물 목록을 반환. keyword 를 주면 당근 서버에서 미리 검색.
-    403(차단) 응답은 조용히 빈손 처리하지 않고 BLOCK_HITS로 집계한다(무효 검색 방지)."""
-    global BLOCK_HITS
-    time.sleep(random.uniform(FETCH_MIN, FETCH_MAX))
+    실패는 조용히 빈손 처리하지 않고 재시도한 뒤 BLOCK_HITS(403)/TIMEOUT_HITS(타임아웃)로 집계한다.
+    → 병렬 갈래에서 지역이 소리없이 빠지는 것을 줄이고(재시도), aggregate가 불완전 여부를 알 수 있게 한다."""
+    global BLOCK_HITS, TIMEOUT_HITS
     params = {"in": tid}
     if keyword:
         params["search"] = keyword
-    try:
-        res = requests.get(
-            "https://www.daangn.com/kr/buy-sell/",
-            params=params,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-            timeout=12,
-        )
-        if res.status_code == 403:
-            BLOCK_HITS += 1
-            time.sleep(1.0)          # 차단 감지 시 잠깐 물러서 IP 부담을 던다
+    for attempt in range(3):          # 최초 + 재시도 (403은 1회, 타임아웃은 2회까지)
+        time.sleep(random.uniform(FETCH_MIN, FETCH_MAX))
+        try:
+            res = requests.get(
+                "https://www.daangn.com/kr/buy-sell/",
+                params=params,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+                timeout=12,
+            )
+            if res.status_code == 403:
+                if attempt < 1:
+                    time.sleep(1.5)     # 소프트 차단은 잠깐 물러서면 풀리기도 한다
+                    continue
+                BLOCK_HITS += 1
+                time.sleep(1.0)
+                return None, []
+            return parse_page(res.text)
+        except Exception:
+            if attempt < 2:
+                time.sleep(1.0 * (attempt + 1))   # 타임아웃은 점증 백오프로 재시도
+                continue
+            TIMEOUT_HITS += 1
             return None, []
-        return parse_page(res.text)
-    except Exception:
-        return None, []
+    return None, []
 
 
 # ==================== 요약문 ====================
@@ -355,8 +366,10 @@ def run_watch(chunk=None, out=None):
                         break
 
     if out:
-        save_json(out, new_items)
-        print(f"[watch] chunk {chunk} — 신규후보 {len(new_items)}건 기록 ({out})")
+        save_json(out, {"items": new_items,
+                        "stats": {"regions": len(tids), "blocks": BLOCK_HITS, "timeouts": TIMEOUT_HITS}})
+        print(f"[watch] chunk {chunk} — 신규후보 {len(new_items)}건 기록 "
+              f"(차단 {BLOCK_HITS}·타임아웃 {TIMEOUT_HITS}) ({out})")
         return
 
     # 단일 실행 모드 (로컬·수동용)
@@ -484,15 +497,22 @@ def run_search(keyword, region, chunk=None, out=None):
                           f"{art.get('title','')} | {art.get('price','')} | {art.get('link','')}", flush=True)
 
     if out:
-        save_json(out, results)
-        print(f"[search] chunk {chunk} — {len(results)}건 기록 ({out})")
+        save_json(out, {"items": results,
+                        "stats": {"regions": total, "blocks": BLOCK_HITS, "timeouts": TIMEOUT_HITS}})
+        print(f"[search] chunk {chunk} — {len(results)}건 기록 "
+              f"(차단 {BLOCK_HITS}·타임아웃 {TIMEOUT_HITS}) ({out})")
         return
 
     # 단일 실행 마무리: CSV 닫고 진행율 100%로 마감 + 텔레그램 요약 (노션은 실시간 적재 완료)
     csv_f.close()
+    lost = BLOCK_HITS + TIMEOUT_HITS
+    warn = ""
+    if lost:
+        warn = (f"\n⚠️ 지역 {lost}개 수집 실패(차단 {BLOCK_HITS}·타임아웃 {TIMEOUT_HITS}) "
+                f"— 결과가 불완전할 수 있어요.")
     edit_telegram(prog_id, f"📡 검색 진행율 100% ({total}/{total})\n✅ 발견 {len(results)}건 · 완료")
-    send_telegram(build_summary(f"🏁 즉석검색 완료 — {keyword} ({scope})", results))
-    print(f"[search] 완료 — {len(results)}건")
+    send_telegram(build_summary(f"🏁 즉석검색 완료 — {keyword} ({scope})", results) + warn)
+    print(f"[search] 완료 — {len(results)}건 (차단 {BLOCK_HITS}·타임아웃 {TIMEOUT_HITS})")
 
 
 def _write_csv(name, items):
@@ -523,11 +543,18 @@ def run_aggregate(target, keyword, indir):
         print(f"[aggregate] region_map 총 {len(region_map)}개 지역")
         return
 
-    # watch / search: 갈래 결과는 매물 리스트
+    # watch / search: 갈래 결과 = {items:[...], stats:{...}} (구버전 순수 리스트도 허용)
     items = []
+    blocks = timeouts = regions = 0
     for p in paths:
         part = load_json(p, [])
-        if isinstance(part, list):
+        if isinstance(part, dict) and "items" in part:
+            items.extend(part.get("items", []))
+            st = part.get("stats", {}) or {}
+            blocks += int(st.get("blocks", 0) or 0)
+            timeouts += int(st.get("timeouts", 0) or 0)
+            regions += int(st.get("regions", 0) or 0)
+        elif isinstance(part, list):          # 구버전 갈래 파일 하위호환
             items.extend(part)
     # 링크 기준 중복 제거
     uniq = {}
@@ -535,16 +562,27 @@ def run_aggregate(target, keyword, indir):
         if it.get("link"):
             uniq[it["link"]] = it
     items = list(uniq.values())
-    print(f"[aggregate] target={target} / 갈래 결과 합계 {len(items)}건")
+
+    # 병렬 갈래에서 소리없이 빠진 지역이 있으면 경고(단일 실행이 갖던 '차단 감지'를 병렬에서 복구)
+    lost = blocks + timeouts
+    warn = ""
+    if lost:
+        pct = f", 약 {lost * 100 // regions}%" if regions else ""
+        warn = (f"\n⚠️ 지역 {lost}개 수집 실패(차단 {blocks} · 타임아웃 {timeouts}{pct}) "
+                f"— 결과가 불완전할 수 있어요. 잠시 후 재검색을 권장합니다.")
+    print(f"[aggregate] target={target} / 합계 {len(items)}건 / "
+          f"차단 {blocks} 타임아웃 {timeouts} (대상지역 {regions})")
 
     if target == "watch":
         seen = load_json(SEEN_FILE, {})
         deliver_watch(items, seen)
+        if warn:
+            send_telegram("🥕 알림봇" + warn)
     elif target == "search":
         for it in items:
             push_notion(it)
         _write_csv(f"검색결과_{(keyword or 'search').replace(' ', '_')}.csv", items)
-        send_telegram(build_summary(f"🏁 즉석검색 완료 — {keyword}", items))
+        send_telegram(build_summary(f"🏁 즉석검색 완료 — {keyword}", items) + warn)
         print(f"[aggregate] 검색 {len(items)}건 — 노션·CSV·요약 완료")
 
 
