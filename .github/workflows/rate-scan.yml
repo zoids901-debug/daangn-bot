@@ -1,0 +1,30 @@
+name: 속도 한계 정밀 측정 (갈래마다 다른 속도)
+
+# 전국을 다 돌려보지 않고, 갈래 하나에 속도 하나씩 맡겨 한 번에 벽을 찾는다.
+# 0.20 req/s = 429 1% 안쪽, 0.30 = 48% 로 확인됐으므로 그 사이를 잘게 훑는다.
+# 갈래마다 IP가 달라 서로 간섭하지 않는다(전국 검증에서 20갈래 동시에도 429 1%였다).
+on:
+  workflow_dispatch:
+    inputs:
+      n:
+        description: '속도마다 보낼 요청 수 (양동이 12~21회/47초를 여러 바퀴 돌 만큼)'
+        required: false
+        default: '80'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        rate: ['0.20', '0.22', '0.24', '0.26', '0.28', '0.30', '0.32', '0.35', '0.40', '0.50']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - name: 속도 ${{ matrix.rate }} req/s
+        run: python _diag_search.py --rate ${{ matrix.rate }} ${{ inputs.n }}

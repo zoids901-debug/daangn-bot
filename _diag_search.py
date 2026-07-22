@@ -270,7 +270,42 @@ def budget(keyword="아이폰", tid="1477", rounds=3):
         print("\n>>> 4분을 기다려도 안 풀림 — 속도 조절로는 답이 없다(경로 변경 필요)")
 
 
+def rate_test(rate, n, keyword="아이폰"):
+    """딱 한 속도로만 쏴서 429 비율을 잰다. 갈래마다 다른 속도를 맡기면 한 번에 훑을 수 있다.
+
+    0.2 req/s 는 1% 안쪽, 0.3 은 48% 로 확인됐다. 그 사이 어디가 벽인지가 곧 최고 속도다.
+    양동이(12~21회/47초)를 여러 바퀴 돌아야 의미가 있으므로 요청 수를 충분히 준다.
+    """
+    gap = 1.0 / rate
+    tally = {}
+    t0 = time.time()
+    for i in range(n):
+        time.sleep(gap)
+        tid = 1 + (i * 37) % 8499
+        try:
+            r = requests.get("https://www.daangn.com/kr/buy-sell/",
+                             params={"in": tid, "search": keyword},
+                             headers={"User-Agent": UA}, timeout=15)
+            if r.status_code == 429:
+                k = "429"
+            elif r.status_code != 200:
+                k = f"HTTP{r.status_code}"
+            elif "__remixContext" not in r.text:
+                k = "200인데목록없음"
+            else:
+                k = "정상"
+        except Exception as e:
+            k = "예외:" + type(e).__name__
+        tally[k] = tally.get(k, 0) + 1
+    el = time.time() - t0
+    bad = n - tally.get("정상", 0)
+    print(f"[속도 {rate:.2f} req/s] 실측 {n/el:.2f} · {n}회 중 실패 {bad} ({bad*100//n}%) {tally}")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--rate":
+        rate_test(float(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) > 3 else 80)
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "--budget":
         budget()
         return
