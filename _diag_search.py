@@ -62,8 +62,11 @@ def load_test(keyword, n, workers):
     import random
     from concurrent.futures import ThreadPoolExecutor
 
+    from collections import Counter
+
     tids = [1 + (i * 37) % 8499 for i in range(n)]
-    zero = ok = blocked = err = 0
+    tally = Counter()
+    samples = []
 
     def one(tid):
         time.sleep(random.uniform(0.4, 1.0))
@@ -71,32 +74,30 @@ def load_test(keyword, n, workers):
             r = requests.get("https://www.daangn.com/kr/buy-sell/",
                              params={"in": tid, "search": keyword},
                              headers={"User-Agent": UA}, timeout=12)
-            if r.status_code == 403:
-                return "blocked"
-            m = re.search(r"window\.__remixContext\s*=\s*({.*?});", r.text, re.DOTALL)
-            if not m:
-                return "err"
-            main = json.loads(m.group(1))["state"]["loaderData"]["routes/kr.buy-sell._index"]
-            return "zero" if not main.get("allPage", {}).get("fleamarketArticles") else "ok"
-        except Exception:
-            return "err"
+        except Exception as e:
+            return "예외:" + type(e).__name__, None
+        if r.status_code != 200:
+            return f"HTTP{r.status_code}", None
+        m = re.search(r"window\.__remixContext\s*=\s*({.*?});", r.text, re.DOTALL)
+        if not m:
+            # 200인데 내용이 다르다 = 봇 판정/챌린지 페이지. 봇의 parse_page 는 이걸
+            # 조용히 (None, []) 로 넘겨 '매물 없음'으로 둔갑시킨다 → 차단 집계도 안 된다.
+            return "200인데_목록없음", (len(r.text), r.text[:200].replace("\n", " "))
+        main = json.loads(m.group(1))["state"]["loaderData"]["routes/kr.buy-sell._index"]
+        return ("0건" if not main.get("allPage", {}).get("fleamarketArticles") else "정상"), None
 
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        for v in ex.map(one, tids):
-            if v == "zero":
-                zero += 1
-            elif v == "ok":
-                ok += 1
-            elif v == "blocked":
-                blocked += 1
-            else:
-                err += 1
+        for kind, s in ex.map(one, tids):
+            tally[kind] += 1
+            if s and len(samples) < 3:
+                samples.append(s)
     el = time.time() - t0
-    print(f"[부하시험] '{keyword}' {n}개 지역 / 워커 {workers} / {el:.0f}초 "
-          f"({n/el:.1f} req/s)")
-    print(f"  결과있음 {ok} · 0건 {zero} · 403차단 {blocked} · 오류 {err}"
-          f"  → 0건 비율 {zero*100//max(n,1)}%")
+    print(f"[부하시험] '{keyword}' {n}개 지역 / 워커 {workers} / {el:.0f}초 ({n/el:.1f} req/s)")
+    for k, v in tally.most_common():
+        print(f"    {k:22s} {v:4d}건 ({v*100//max(n,1)}%)")
+    for ln, head in samples:
+        print(f"    [본문표본 {ln}자] {head}")
 
 
 def main():
