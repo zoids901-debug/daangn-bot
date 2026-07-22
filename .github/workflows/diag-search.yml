@@ -14,6 +14,10 @@ on:
         description: '지역코드(쉼표 구분)'
         required: false
         default: '395'
+      load:
+        description: '부하시험 지역 수(0이면 안 함). 실제 검색과 같은 속도로 훑어 0건 비율을 잰다'
+        required: false
+        default: '0'
 
 jobs:
   diag:
@@ -27,3 +31,6 @@ jobs:
       - run: pip install requests
       - name: 진단
         run: python _diag_search.py "${{ inputs.keyword }}" "${{ inputs.tids }}"
+      - name: 부하시험
+        if: inputs.load != '0'
+        run: python _diag_search.py --load "아이폰" "${{ inputs.load }}" 4

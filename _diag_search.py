@@ -52,7 +52,59 @@ def probe(keyword, tid=None):
         print(f"        [{a.get('status')}] {fix(a.get('title',''))}")
 
 
+def load_test(keyword, n, workers):
+    """부하 재현: 실제 검색과 같은 속도로 N개 지역을 훑어, '결과 0건'으로 오는 비율을 센다.
+
+    당근이 막을 때 403을 주면 봇이 '차단'으로 셀 수 있지만, 200 + 빈 목록으로 주면
+    봇은 그걸 '이 동네엔 매물이 없다'로 착각한다 → 전국 0건. 그 조용한 빈손을 찾는다.
+    대조군으로 어디에나 매물이 있는 키워드를 쓰면, 0건 비율이 곧 누락률이다.
+    """
+    import random
+    from concurrent.futures import ThreadPoolExecutor
+
+    tids = [1 + (i * 37) % 8499 for i in range(n)]
+    zero = ok = blocked = err = 0
+
+    def one(tid):
+        time.sleep(random.uniform(0.4, 1.0))
+        try:
+            r = requests.get("https://www.daangn.com/kr/buy-sell/",
+                             params={"in": tid, "search": keyword},
+                             headers={"User-Agent": UA}, timeout=12)
+            if r.status_code == 403:
+                return "blocked"
+            m = re.search(r"window\.__remixContext\s*=\s*({.*?});", r.text, re.DOTALL)
+            if not m:
+                return "err"
+            main = json.loads(m.group(1))["state"]["loaderData"]["routes/kr.buy-sell._index"]
+            return "zero" if not main.get("allPage", {}).get("fleamarketArticles") else "ok"
+        except Exception:
+            return "err"
+
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for v in ex.map(one, tids):
+            if v == "zero":
+                zero += 1
+            elif v == "ok":
+                ok += 1
+            elif v == "blocked":
+                blocked += 1
+            else:
+                err += 1
+    el = time.time() - t0
+    print(f"[부하시험] '{keyword}' {n}개 지역 / 워커 {workers} / {el:.0f}초 "
+          f"({n/el:.1f} req/s)")
+    print(f"  결과있음 {ok} · 0건 {zero} · 403차단 {blocked} · 오류 {err}"
+          f"  → 0건 비율 {zero*100//max(n,1)}%")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--load":
+        load_test(sys.argv[2] if len(sys.argv) > 2 else "아이폰",
+                  int(sys.argv[3]) if len(sys.argv) > 3 else 200,
+                  int(sys.argv[4]) if len(sys.argv) > 4 else 4)
+        return
     keyword = sys.argv[1] if len(sys.argv) > 1 else "불가리안백"
     tids = sys.argv[2].split(",") if len(sys.argv) > 2 else ["395"]
     print(f"=== 진단: '{keyword}' ===")
