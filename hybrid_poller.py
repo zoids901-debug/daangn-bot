@@ -55,9 +55,33 @@ def run_share(d, req):
     d.run_search(req["keyword"], req.get("region", ""), chunk=LAPTOP_FRACTION)
 
 
+def acquire_lock():
+    """앞선 poller 가 아직 검색 중이면 이번 실행은 조용히 종료(5분 스케줄 겹침 방지).
+    락 파일에 시작 시각을 적어, 45분 넘게 묵은 락은 죽은 것으로 보고 뺏는다."""
+    lock = os.path.join(HERE, ".hybrid_poller.lock")
+    if os.path.exists(lock):
+        try:
+            age = time.time() - os.path.getmtime(lock)
+        except OSError:
+            age = 0
+        if age < 45 * 60:
+            return False
+    open(lock, "w").write(str(time.time()))
+    return True
+
+
+def release_lock():
+    try:
+        os.remove(os.path.join(HERE, ".hybrid_poller.lock"))
+    except OSError:
+        pass
+
+
 def main():
     if not os.path.isdir(os.path.join(HERE, ".git")):
         log("daangn-bot git 클론이 아님 — 종료"); return
+    if not acquire_lock():
+        return                               # 앞 인스턴스가 검색 중 — 조용히 종료
     git("reset", "--hard", "HEAD")           # 작업트리 오염만 정리
     git("pull", "--ff-only")
     os.makedirs(HYDIR, exist_ok=True)
@@ -98,4 +122,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        release_lock()

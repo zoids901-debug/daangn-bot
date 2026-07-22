@@ -7,3 +7,7 @@ __pycache__/
 _search_run.py
 _upload_to_github.py
 main
+
+# 하이브리드 poller 단일 인스턴스 락 (로컬 전용)
+.hybrid_poller.lock
+hybrid_poller.log
