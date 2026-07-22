@@ -302,7 +302,60 @@ def rate_test(rate, n, keyword="아이폰"):
     print(f"[속도 {rate:.2f} req/s] 실측 {n/el:.2f} · {n}회 중 실패 {bad} ({bad*100//n}%) {tally}")
 
 
+def worker_scan(lo=1, hi=10, n=40, keyword="아이폰", cooldown=15):
+    """워커 수를 1씩 올려가며 실제 처리량과 실패를 잰다(집 IP 용).
+
+    집 IP 는 429 로 끊는 대신 응답을 느리게 하거나 내용이 빈 응답을 준다. 그래서
+    '몇 워커까지가 이득인가'는 성공률이 아니라 초당 성공 건수로 봐야 한다.
+    4/8/12 처럼 건너뛰면 최적점을 지나친다 → 1 단위로 훑는다.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    print(f"=== 워커별 처리량 ({lo}~{hi}, 각 {n}회) ===")
+    best = (0, 0)
+    for w in range(lo, hi + 1):
+        tids = [1 + (i * 37 + w * 911) % 8499 for i in range(n)]
+
+        def one(tid):
+            try:
+                r = requests.get("https://www.daangn.com/kr/buy-sell/",
+                                 params={"in": tid, "search": keyword},
+                                 headers={"User-Agent": UA}, timeout=20)
+                if r.status_code == 429:
+                    return "429"
+                if r.status_code != 200:
+                    return f"HTTP{r.status_code}"
+                return "정상" if "__remixContext" in r.text else "빈응답"
+            except Exception as e:
+                return "예외:" + type(e).__name__
+
+        t0 = time.time()
+        tally = {}
+        with ThreadPoolExecutor(max_workers=w) as ex:
+            for v in ex.map(one, tids):
+                tally[v] = tally.get(v, 0) + 1
+        el = time.time() - t0
+        ok = tally.get("정상", 0)
+        good = ok / el                      # 초당 '쓸모 있는' 응답 — 이게 진짜 처리량
+        mark = ""
+        if good > best[1]:
+            best = (w, good); mark = "  ← 최고"
+        print(f"  워커 {w:2d}: 성공 {ok:2d}/{n} · 총 {n/el:5.2f} req/s · "
+              f"실효 {good:5.2f} req/s {tally}{mark}")
+        time.sleep(cooldown)
+
+    w, rate = best
+    print(f"\n>>> 최적 워커 {w}개 · 실효 {rate:.2f} req/s")
+    if rate:
+        print(f">>> 전국 8,499지역 → 약 {8499/rate/60:.0f}분")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--workers":
+        worker_scan(int(sys.argv[2]) if len(sys.argv) > 2 else 1,
+                    int(sys.argv[3]) if len(sys.argv) > 3 else 10,
+                    int(sys.argv[4]) if len(sys.argv) > 4 else 40)
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "--rate":
         rate_test(float(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) > 3 else 80)
         return
