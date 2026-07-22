@@ -56,10 +56,10 @@ jobs:
       - run: pip install -r requirements.txt
       - name: 갈래 ${{ matrix.i }} 감시
         env:
-          # 검색과 같은 이유로 감속(2026-07-22: 4워커는 429가 70%). 아래 fetch_region 참고.
-          MAX_WORKERS: '2'
-          FETCH_DELAY_MIN: '0.6'
-          FETCH_DELAY_MAX: '1.4'
+          # 검색과 같은 실측값(2026-07-22): 갈래당 양동이 12~21회 · 회복 47초 → 0.2 req/s.
+          MAX_WORKERS: '1'
+          FETCH_DELAY_MIN: '4.0'
+          FETCH_DELAY_MAX: '6.0'
         run: |
           mkdir -p results
           python daangn_search.py --mode watch \

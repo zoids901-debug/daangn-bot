@@ -54,12 +54,14 @@ jobs:
       - run: pip install -r requirements.txt
       - name: 갈래 ${{ matrix.i }} 검색
         env:
-          # 2026-07-22 실측: 4워커(3.9 req/s)는 요청의 70%가 429(요청 과다)로 반려됐다.
-          # 그때는 429를 못 알아채고 빈손을 '매물 없음'으로 삼켜 전국 0건이 나왔다.
-          # 지금은 429를 차단으로 세고 스스로 감속하지만, 애초에 덜 두드리는 게 맞다.
-          MAX_WORKERS: '2'
-          FETCH_DELAY_MIN: '0.6'
-          FETCH_DELAY_MAX: '1.4'
+          # 2026-07-22 실측으로 정한 값. 당근은 갈래(IP)마다 '양동이'로 끊는다:
+          #   양동이 ≈ 12~21회 · 비면 ≈ 47초 회복 → 지속 가능 ≈ 0.2~0.3 req/s
+          #   (0.3 req/s 에서 429가 48%, 3.9 req/s 에서 70%)
+          # 그래서 워커 1개 + 요청 간격 5초 ≈ 0.2 req/s 로 묶는다.
+          # 갈래 20개면 합계 4 req/s → 전국 8,499지역 약 35분. 429 없이 도는 게 목표다.
+          MAX_WORKERS: '1'
+          FETCH_DELAY_MIN: '4.0'
+          FETCH_DELAY_MAX: '6.0'
         run: |
           mkdir -p results
           python daangn_search.py --mode search \

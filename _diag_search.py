@@ -257,10 +257,15 @@ def budget(keyword="아이폰", tid="1477", rounds=3):
     good = [w for w in waits if w]
     if good:
         avg = sum(good) / len(good)
-        rate = 1 / avg
-        print(f"\n>>> 양동이 크기 ≈ {sum(sizes)//len(sizes)}회 · 회복 ≈ {avg:.0f}초")
+        size = sum(sizes) / len(sizes)
+        # 회복 뒤에는 다시 '양동이 하나만큼' 통과한다. 1회만 되는 게 아니다.
+        # 한 주기 = 양동이를 비우는 시간(1초 간격이므로 size 초) + 회복시간.
+        rate = size / (size + avg) if size else 0
+        print(f"\n>>> 양동이 크기 ≈ {size:.0f}회 · 회복 ≈ {avg:.0f}초")
         print(f">>> 지속 가능 속도 ≈ {rate:.2f} req/s (갈래 1개 기준)")
-        print(f">>> 8499지역 / 20갈래 = 425지역 → 갈래당 약 {425/rate/60:.0f}분")
+        if rate:
+            print(f">>> 8499지역 / 20갈래 = 425지역 → 갈래당 약 {425/rate/60:.0f}분")
+            print(f">>> 권장 요청 간격 ≈ {1/rate:.1f}초 (안전하게 그 1.2배)")
     else:
         print("\n>>> 4분을 기다려도 안 풀림 — 속도 조절로는 답이 없다(경로 변경 필요)")
 
