@@ -237,15 +237,28 @@ def parse_page(html):
     try:
         data = json.loads(m.group(1).encode("utf-8", "replace").decode("utf-8"))
         main = data.get("state", {}).get("loaderData", {}).get("routes/kr.buy-sell._index", {})
+        return parse_loader(main, broken_encoding=True)
+    except Exception:
+        return None, []
+
+
+def parse_loader(main, broken_encoding=False):
+    """당근이 내려주는 화면 데이터 덩어리 -> (지역명, [진행중 매물 ...]).
+
+    HTML 안에 박힌 것과 JSON 주소로 받은 것이 같은 구조라 파싱을 한 곳에서 한다.
+    HTML 경로는 인코딩이 깨져 들어오므로 그때만 복구한다(JSON 은 안 깨진다).
+    """
+    fix = _fix if broken_encoding else (lambda t: t)
+    try:
         reg  = main.get("region", {})
-        addr = f"{_fix(reg.get('depth1RegionName',''))} {_fix(reg.get('depth2RegionName',''))}".strip()
+        addr = f"{fix(reg.get('depth1RegionName',''))} {fix(reg.get('depth2RegionName',''))}".strip()
 
         exclude = ["판매완료", "거래완료", "완료", "솔드아웃", "예약중"]
         items = []
         for it in main.get("allPage", {}).get("fleamarketArticles", []):
             if it.get("status", "") != "Ongoing":
                 continue
-            title = _fix(it.get("title", ""))
+            title = fix(it.get("title", ""))
             if any(ex in title.replace(" ", "") for ex in exclude):
                 continue
             try:
@@ -314,6 +327,26 @@ def _speed_up():
             _throttle = max(1.0, _throttle * 0.9)   # 성공이 이어지면 곧 원래 속도로 복귀
 
 
+# 스레드마다 연결을 하나씩 두고 계속 재쓴다. 지역마다 새로 연결하면 TCP/TLS 악수를
+# 8,499번 반복하게 되는데, 실측으로 그게 전체 시간의 절반이었다.
+#   2026-07-22 실측(집 IP, 워커 5, 각 40회):
+#     HTML+새연결 2.26 req/s → HTML+재사용 4.29 → JSON+재사용 5.55 (2.45배, 전국 58분→26분)
+#     HTTP/2 는 당근이 403 으로 막는다(브라우저가 안 쓰는 방식이라 봇 판정) — 쓰지 말 것.
+_local = threading.local()
+
+# 화면 데이터만 주는 주소. 같은 내용을 1/15 크기로 주고, 한글도 안 깨진다.
+DATA_ROUTE = "routes/kr.buy-sell._index"
+
+
+def _session():
+    s = getattr(_local, "sess", None)
+    if s is None:
+        s = requests.Session()
+        s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        _local.sess = s
+    return s
+
+
 def fetch_region(tid, keyword=None):
     """지역 페이지 1개를 가져와 매물 목록을 반환. keyword 를 주면 당근 서버에서 미리 검색.
 
@@ -321,16 +354,15 @@ def fetch_region(tid, keyword=None):
     차단(403/429)·타임아웃·목록 없는 응답을 각각 재시도하고, 끝내 실패하면 집계한다.
     → 병렬 갈래에서 지역이 소리없이 빠지지 않고, aggregate가 결과 불완전 여부를 알 수 있다."""
     global BLOCK_HITS, TIMEOUT_HITS
-    params = {"in": tid}
+    params = {"in": tid, "_data": DATA_ROUTE}
     if keyword:
         params["search"] = keyword
     for attempt in range(4):
         time.sleep(random.uniform(FETCH_MIN, FETCH_MAX) * _throttle)
         try:
-            res = requests.get(
+            res = _session().get(
                 "https://www.daangn.com/kr/buy-sell/",
                 params=params,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
                 timeout=12,
             )
             if res.status_code in BLOCK_CODES:
@@ -346,7 +378,11 @@ def fetch_region(tid, keyword=None):
                 BLOCK_HITS += 1
                 _mark_failed(tid)
                 return None, []
-            addr, items = parse_page(res.text)
+            try:
+                addr, items = parse_loader(res.json())
+            except ValueError:
+                # JSON 주소가 막히거나 사라지면 예전처럼 페이지 통째로 받아 파싱한다.
+                addr, items = parse_page(res.text)
             if addr is None:
                 # 200인데 매물 목록 자체가 없는 응답 = 사실상 차단(또는 페이지 구조 변경).
                 # 예전엔 이걸 '이 동네엔 매물 없음'으로 삼켜서 전국 0건이 나왔다.
@@ -412,22 +448,48 @@ def run_watch(chunk=None, out=None):
     norm_keywords = [(k, keyword_words(k)) for k in keywords]
     print(f"[watch] chunk={chunk or '전체'} / 지역 {len(tids)}개 / 키워드 {keywords}")
 
+    global BLOCK_HITS
     new_items, done = [], 0
+
+    def absorb(articles):
+        for art in articles:
+            if not art["link"] or art["link"] in seen:
+                continue
+            for kw, words in norm_keywords:
+                if title_matches(art["title"], words):
+                    art["keyword"] = kw
+                    new_items.append(art)
+                    break
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = [ex.submit(fetch_region, tid) for tid in tids]
         for fut in as_completed(futures):
             done += 1
             if done % 100 == 0:
-                print(f"  진행 {done}/{len(tids)} ... 신규후보 {len(new_items)}건")
-            _, articles = fut.result()
-            for art in articles:
-                if not art["link"] or art["link"] in seen:
-                    continue
-                for kw, words in norm_keywords:
-                    if title_matches(art["title"], words):
-                        art["keyword"] = kw
-                        new_items.append(art)
-                        break
+                blk = f" · ⚠️차단 {BLOCK_HITS}건" if BLOCK_HITS else ""
+                print(f"  진행 {done}/{len(tids)} ... 신규후보 {len(new_items)}건{blk}", flush=True)
+            try:
+                _, articles = fut.result()
+            except Exception:
+                continue          # 한 지역이 터져도 나머지 감시는 계속돼야 한다
+            absorb(articles)
+
+    # 검색과 똑같이 보정 패스를 돈다. 감시는 '새로 올라온 매물'을 잡는 게 목적이라
+    # 그날 못 읽은 지역은 영영 못 잡는다(다음 회차엔 이미 seen 이 아니라 그냥 놓친 게 된다).
+    for round_no in (1, 2):
+        retry = drain_failed()
+        if not retry:
+            break
+        print(f"  [보정{round_no}] 수집 실패 {len(retry)}개 지역 재수집(느린 속도)", flush=True)
+        recovered = 0
+        for tid in retry:
+            addr, articles = fetch_region(tid)
+            if addr is None:
+                continue
+            recovered += 1
+            absorb(articles)
+        BLOCK_HITS = max(0, BLOCK_HITS - recovered)
+        print(f"  [보정{round_no}] {recovered}/{len(retry)}개 지역 복구", flush=True)
 
     if out:
         save_json(out, {"items": new_items,

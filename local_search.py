@@ -11,8 +11,8 @@ os.environ["MAX_WORKERS"] = "5"          # 2026-07-22 워커 1~10 전수 측정(
                                           #   1:0.76  2:1.79  3:1.97  4:2.40  5:2.44 ← 최고
                                           #   6:2.26  7:2.16  8:1.57  9:1.60 10:1.44
                                           # 4~5가 평평한 천장이고 6부터 꺾인다. 더 늘리면 손해.
-os.environ["FETCH_DELAY_MIN"] = "0.1"    # 지역요청 대기 최소(초) — 대기는 짧게, 동시수로 throttle 회피
-os.environ["FETCH_DELAY_MAX"] = "0.2"    # 지역요청 대기 최대(초)
+os.environ["FETCH_DELAY_MIN"] = "0.05"   # 연결 재사용 + JSON 으로 바뀐 뒤엔 대기가 병목이 아니다.
+os.environ["FETCH_DELAY_MAX"] = "0.15"   # 워커 5개가 천장이라 대기는 최소로 둔다.
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, r"C:\Users\zoids\Scripts\creds")
 
@@ -31,8 +31,8 @@ if not keyword:
     print("키워드가 비어 있습니다.")
     sys.exit(1)
 
-print(f"\n'{keyword}' 전국 검색 시작 (집 인터넷 1개 IP, 8,499지역 = 약 58분)...")
-print("  ※ 워커 5개가 천장(2.44 req/s). 더 늘리면 오히려 느려집니다.")
+print(f"\n'{keyword}' 전국 검색 시작 (집 인터넷 1개 IP, 8,499지역 = 약 23분)...")
+print("  ※ 워커 5개가 천장. 연결 재사용 + JSON 주소로 2.4배 빨라진 상태입니다.")
 print("  ※ 깃허브 병렬은 더 빠르지 않습니다 — 당근이 데이터센터 IP를 속도와 무관하게")
 print("     30% 이상 거절합니다(12.5초에 한 번 쏴도 30%). 러너 20대 = 이 노트북 1.4대.")
 print("결과는 노션에 실시간 적재, 끝나면 텔레그램으로 요약이 옵니다.\n")

@@ -302,7 +302,7 @@ def rate_test(rate, n, keyword="아이폰"):
     print(f"[속도 {rate:.2f} req/s] 실측 {n/el:.2f} · {n}회 중 실패 {bad} ({bad*100//n}%) {tally}")
 
 
-def worker_scan(lo=1, hi=10, n=40, keyword="아이폰", cooldown=15):
+def worker_scan(lo=1, hi=10, n=40, keyword="아이폰", cooldown=15, use_json=False):
     """워커 수를 1씩 올려가며 실제 처리량과 실패를 잰다(집 IP 용).
 
     집 IP 는 429 로 끊는 대신 응답을 느리게 하거나 내용이 빈 응답을 준다. 그래서
@@ -311,21 +311,25 @@ def worker_scan(lo=1, hi=10, n=40, keyword="아이폰", cooldown=15):
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    print(f"=== 워커별 처리량 ({lo}~{hi}, 각 {n}회) ===")
+    mode = "JSON(가벼움)" if use_json else "HTML(무거움)"
+    print(f"=== 워커별 처리량 [{mode}] ({lo}~{hi}, 각 {n}회) ===")
     best = (0, 0)
     for w in range(lo, hi + 1):
         tids = [1 + (i * 37 + w * 911) % 8499 for i in range(n)]
 
         def one(tid):
+            p = {"in": tid, "search": keyword}
+            if use_json:
+                p["_data"] = "routes/kr.buy-sell._index"
             try:
-                r = requests.get("https://www.daangn.com/kr/buy-sell/",
-                                 params={"in": tid, "search": keyword},
+                r = requests.get("https://www.daangn.com/kr/buy-sell/", params=p,
                                  headers={"User-Agent": UA}, timeout=20)
                 if r.status_code == 429:
                     return "429"
                 if r.status_code != 200:
                     return f"HTTP{r.status_code}"
-                return "정상" if "__remixContext" in r.text else "빈응답"
+                mark = "allPage" if use_json else "__remixContext"
+                return "정상" if mark in r.text else "빈응답"
             except Exception as e:
                 return "예외:" + type(e).__name__
 
@@ -354,7 +358,8 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--workers":
         worker_scan(int(sys.argv[2]) if len(sys.argv) > 2 else 1,
                     int(sys.argv[3]) if len(sys.argv) > 3 else 10,
-                    int(sys.argv[4]) if len(sys.argv) > 4 else 40)
+                    int(sys.argv[4]) if len(sys.argv) > 4 else 40,
+                    use_json=(len(sys.argv) > 5 and sys.argv[5] == "json"))
         return
     if len(sys.argv) > 1 and sys.argv[1] == "--rate":
         rate_test(float(sys.argv[2]), int(sys.argv[3]) if len(sys.argv) > 3 else 80)
