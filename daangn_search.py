@@ -278,9 +278,10 @@ BLOCK_CODES = (403, 429)
 # 429가 나오면 전체가 느려지도록 스스로 감속한다(갈래 안 공용).
 _throttle = 1.0
 _throttle_lock = threading.Lock()
-# 감속 상한. 너무 크게 잡으면(8배) 전국 훑기가 30분 넘게 늘어진다.
-# 어차피 끝내 못 읽은 지역은 뒤의 보정 패스가 느리게 다시 훑으므로, 본 훑기는 3배까지만.
-THROTTLE_MAX = 3.0
+# 감속 상한. 기본 간격이 이미 실측 안전선(갈래당 0.2 req/s)이라, 여기서 더 늦출 이유가 거의 없다.
+# 2026-07-22: 상한 3배로 뒀더니 429가 1%뿐인데도 간격이 15초까지 늘어 전국이 35분→3시간이 됐다.
+# 못 읽은 지역은 뒤의 보정 패스가 책임지므로, 본 훑기는 1.5배까지만 늦춘다.
+THROTTLE_MAX = 1.5
 
 # 끝내 못 읽은 지역. 훑기가 끝난 뒤 느린 속도로 다시 훑어 메운다(보정 패스).
 # 이게 없으면 차단이 많은 날에는 그 지역 매물이 통째로 빠진 채 결과가 나온다.
@@ -303,7 +304,7 @@ def drain_failed():
 def _slow_down():
     global _throttle
     with _throttle_lock:
-        _throttle = min(_throttle * 1.5, THROTTLE_MAX)
+        _throttle = min(_throttle * 1.2, THROTTLE_MAX)
 
 
 def _speed_up():
