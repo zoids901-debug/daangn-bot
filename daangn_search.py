@@ -280,6 +280,23 @@ _throttle = 1.0
 _throttle_lock = threading.Lock()
 THROTTLE_MAX = 8.0
 
+# 끝내 못 읽은 지역. 훑기가 끝난 뒤 느린 속도로 다시 훑어 메운다(보정 패스).
+# 이게 없으면 차단이 많은 날에는 그 지역 매물이 통째로 빠진 채 결과가 나온다.
+FAILED_TIDS = []
+_failed_lock = threading.Lock()
+
+
+def _mark_failed(tid):
+    with _failed_lock:
+        FAILED_TIDS.append(tid)
+
+
+def drain_failed():
+    with _failed_lock:
+        out = list(FAILED_TIDS)
+        FAILED_TIDS.clear()
+    return out
+
 
 def _slow_down():
     global _throttle
@@ -324,6 +341,7 @@ def fetch_region(tid, keyword=None):
                     time.sleep(min(wait or 2.0 * (attempt + 1), 20))
                     continue
                 BLOCK_HITS += 1
+                _mark_failed(tid)
                 return None, []
             addr, items = parse_page(res.text)
             if addr is None:
@@ -334,6 +352,7 @@ def fetch_region(tid, keyword=None):
                     time.sleep(2.0 * (attempt + 1))
                     continue
                 BLOCK_HITS += 1
+                _mark_failed(tid)
                 return None, []
             _speed_up()
             return addr, items
@@ -342,6 +361,7 @@ def fetch_region(tid, keyword=None):
                 time.sleep(1.0 * (attempt + 1))   # 타임아웃은 점증 백오프로 재시도
                 continue
             TIMEOUT_HITS += 1
+            _mark_failed(tid)
             return None, []
     return None, []
 
@@ -456,6 +476,7 @@ def prune_seen(seen):
 
 # ==================== 모드: search (즉석검색 갈래 워커) ====================
 def run_search(keyword, region, chunk=None, out=None):
+    global BLOCK_HITS          # 보정 패스에서 되살아난 지역을 실패 집계에서 뺀다
     keyword = (keyword or "").strip()
     if not keyword:
         if out:
@@ -498,6 +519,25 @@ def run_search(keyword, region, chunk=None, out=None):
         csv_w.writerow(["지역", "상품명", "가격", "링크"])
         csv_f.flush()
 
+    def absorb(articles):
+        """찾은 매물을 걸러 결과에 담는다(본 훑기와 보정 패스가 같은 처리를 쓰도록)."""
+        for art in articles:
+            if not title_matches(art["title"], kw_words):
+                continue
+            fp = f"{art['title']}_{art['price']}_{art['addr']}"
+            if fp in seen_fp:
+                continue
+            seen_fp.add(fp)
+            art["keyword"] = keyword
+            results.append(art)
+            if single:
+                push_notion(art)                       # 발견 즉시 노션 적재
+                csv_w.writerow([art.get("addr", ""), art.get("title", ""),
+                                art.get("price", ""), art.get("link", "")])
+                csv_f.flush()                          # 즉시 디스크 반영(중단 대비)
+                print(f"★ 발견[{len(results)}] {art.get('addr','')} | "
+                      f"{art.get('title','')} | {art.get('price','')} | {art.get('link','')}", flush=True)
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = [ex.submit(fetch_region, tid, keyword) for tid in tids]
         for fut in as_completed(futures):
@@ -520,22 +560,26 @@ def run_search(keyword, region, chunk=None, out=None):
                 _, articles = fut.result()
             except Exception:
                 continue
-            for art in articles:
-                if not title_matches(art["title"], kw_words):
-                    continue
-                fp = f"{art['title']}_{art['price']}_{art['addr']}"
-                if fp in seen_fp:
-                    continue
-                seen_fp.add(fp)
-                art["keyword"] = keyword
-                results.append(art)
-                if single:
-                    push_notion(art)                       # 발견 즉시 노션 적재
-                    csv_w.writerow([art.get("addr", ""), art.get("title", ""),
-                                    art.get("price", ""), art.get("link", "")])
-                    csv_f.flush()                          # 즉시 디스크 반영(중단 대비)
-                    print(f"★ 발견[{len(results)}] {art.get('addr','')} | "
-                          f"{art.get('title','')} | {art.get('price','')} | {art.get('link','')}", flush=True)
+            absorb(articles)
+
+    # ── 보정 패스: 끝내 못 읽은 지역을 느린 속도로 혼자 다시 훑는다 ──
+    # 차단이 몰린 날엔 그 지역 매물이 통째로 빠진 채 "0건"이 나온다.
+    # (2026-07-22: 평택 불가리안백 12KG처럼 사람은 보는데 봇은 못 보던 매물이 여기서 걸린다)
+    for round_no in (1, 2):
+        retry = drain_failed()
+        if not retry:
+            break
+        print(f"  [보정{round_no}] 수집 실패 {len(retry)}개 지역 재수집(느린 속도)", flush=True)
+        recovered = 0
+        for tid in retry:
+            addr, articles = fetch_region(tid, keyword)
+            if addr is None:
+                continue
+            recovered += 1
+            absorb(articles)
+        # 되살아난 지역은 실패 집계에서 뺀다(경고가 과장되지 않게)
+        BLOCK_HITS = max(0, BLOCK_HITS - recovered)
+        print(f"  [보정{round_no}] {recovered}/{len(retry)}개 지역 복구", flush=True)
 
     if out:
         save_json(out, {"items": results,
