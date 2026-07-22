@@ -1,0 +1,29 @@
+name: 검색 진단 (집 IP vs 깃허브 IP)
+
+# 같은 키워드·지역코드로 당근에 물어, 응답 건수와 상태를 그대로 찍는다.
+# 로컬에서 `py _diag_search.py <키워드> <지역코드>` 를 돌린 결과와 로그를 비교하면
+# "검색이 깨진 것"인지 "깃허브 IP에만 빈손으로 오는 것"인지 갈린다. 텔레그램 안 씀.
+on:
+  workflow_dispatch:
+    inputs:
+      keyword:
+        description: '검색할 키워드'
+        required: true
+        default: '불가리안백'
+      tids:
+        description: '지역코드(쉼표 구분)'
+        required: false
+        default: '395'
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - name: 진단
+        run: python _diag_search.py "${{ inputs.keyword }}" "${{ inputs.tids }}"
