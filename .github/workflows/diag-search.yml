@@ -22,6 +22,10 @@ on:
         description: '안전속도 측정: 단계당 요청 수(0이면 안 함). 느린 쪽부터 올려 429 없는 최대 속도를 찾는다'
         required: false
         default: '0'
+      fingerprint:
+        description: '요청자 판별(1이면 실행). 러너 공인 IP + 헤더별 통과율 — 속도가 아니라 IP/헤더 문제인지 가른다'
+        required: false
+        default: '0'
 
 jobs:
   diag:
@@ -41,3 +45,6 @@ jobs:
       - name: 안전속도 측정
         if: inputs.ramp != '0'
         run: python _diag_search.py --ramp "아이폰" "${{ inputs.ramp }}"
+      - name: 요청자 판별 (IP·헤더)
+        if: inputs.fingerprint == '1'
+        run: python _diag_search.py --fingerprint

@@ -159,7 +159,63 @@ def ramp(keyword="아이폰", per_phase=60, cooldown=45):
         print("\n>>> 가장 느린 단계에서도 429 — 지금은 깃허브에서 검색을 자제할 것")
 
 
+def fingerprint(keyword="아이폰", tid="1477"):
+    """속도가 아니라 '누가 요청하느냐'가 문제인지 가른다.
+
+    - 러너의 공인 IP를 찍어 둔다(다른 실행과 비교해 IP별인지 대역 전체인지 판별).
+    - 헤더만 바꿔 같은 요청을 반복한다. 지금 봇은 User-Agent 한 줄만 보내는데,
+      진짜 브라우저는 Accept/Accept-Language/sec-ch-ua 등을 함께 보낸다.
+      헤더만으로 통과율이 달라지면 원인은 IP가 아니라 '봇처럼 보이는 요청'이다.
+    """
+    try:
+        ip = requests.get("https://api.ipify.org", timeout=10).text
+    except Exception:
+        ip = "(확인 실패)"
+    print(f"=== 요청자 판별 (러너 공인 IP: {ip}) ===")
+
+    bare = {"User-Agent": UA}
+    browser = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
+        "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+                   "image/avif,image/webp,*/*;q=0.8"),
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://www.daangn.com/kr/buy-sell/",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "sec-ch-ua": '"Chromium";v="126", "Not:A-Brand";v="24", "Google Chrome";v="126"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+    }
+
+    for label, hdr, sess in (("현재(UA만)", bare, False),
+                             ("브라우저 헤더", browser, False),
+                             ("브라우저 헤더+세션유지", browser, True)):
+        s = requests.Session() if sess else requests
+        codes = {}
+        for i in range(12):
+            time.sleep(1.5)
+            try:
+                r = s.get("https://www.daangn.com/kr/buy-sell/",
+                          params={"in": tid, "search": keyword}, headers=hdr, timeout=15)
+                key = str(r.status_code)
+                if r.status_code == 200 and "__remixContext" not in r.text:
+                    key = "200(목록없음)"
+            except Exception as e:
+                key = "예외:" + type(e).__name__
+            codes[key] = codes.get(key, 0) + 1
+        ok = codes.get("200", 0)
+        print(f"  {label:20s} 12회 → 성공 {ok:2d} · {codes}")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--fingerprint":
+        fingerprint()
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "--ramp":
         ramp(sys.argv[2] if len(sys.argv) > 2 else "아이폰",
              int(sys.argv[3]) if len(sys.argv) > 3 else 60)
