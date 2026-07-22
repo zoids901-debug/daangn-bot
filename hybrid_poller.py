@@ -47,6 +47,25 @@ def load_creds():
     return d
 
 
+def ip_ok():
+    """당근이 이 IP를 받아주는지 1건만 찔러본다.
+
+    [왜] 2026-07-22 실전: 하루 물량이 몰리자 당근(CloudFront)이 노트북 IP를 통째로
+    403 차단 → claim은 걸어놓고 앞 2/3를 전부 빈손으로 끝낼 뻔했다. 차단 상태면
+    claim 자체를 안 걸어야 서버가 grace 뒤 전국을 전담한다(노트북 꺼짐과 같은 폴백)."""
+    import requests
+    try:
+        r = requests.get(
+            "https://www.daangn.com/kr/buy-sell/",
+            params={"in": "9", "_data": "routes/kr.buy-sell._index"},
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            timeout=10,
+        )
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
 def run_share(d, req):
     """앞장 몫 검색. local_search 를 별도로 안 쓰고 직접 부른다(같은 프로세스)."""
     os.environ["MAX_WORKERS"] = "5"
@@ -101,6 +120,9 @@ def main():
             continue
         if time.time() - req.get("ts", 0) > STALE_SEC:
             continue                          # 너무 오래된 요청
+        if not ip_ok():
+            log("이 IP가 당근에 차단됨 — claim 없이 불참(서버가 전국 전담)")
+            return
 
         # claim 을 먼저 만들어 서버에 알린다(서버는 이걸 보고 뒷몫만 돈다).
         open(claim, "w", encoding="utf-8").write(time.strftime("%Y-%m-%d %H:%M:%S"))
