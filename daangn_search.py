@@ -267,20 +267,45 @@ def parse_page(html):
         return None, []
 
 
-BLOCK_HITS = 0     # 403 차단 누적(전역)
+BLOCK_HITS = 0     # 차단(403/429) 누적(전역)
 TIMEOUT_HITS = 0   # 타임아웃·네트워크 오류 누적(전역) — 병렬 갈래의 '조용한 누락' 감지용
+
+# 당근이 속도를 조일 때 쓰는 응답 코드. 403뿐 아니라 429(요청 과다)도 차단이다.
+# (2026-07-22 사고: 429를 못 알아보고 그 응답을 그냥 파싱 → 매물 0건으로 둔갑 →
+#  '불가리안백 전국 0건 · 차단 0'. 깃허브에서 실측하니 요청의 70%가 429였다.)
+BLOCK_CODES = (403, 429)
+
+# 429가 나오면 전체가 느려지도록 스스로 감속한다(갈래 안 공용).
+_throttle = 1.0
+_throttle_lock = threading.Lock()
+THROTTLE_MAX = 8.0
+
+
+def _slow_down():
+    global _throttle
+    with _throttle_lock:
+        _throttle = min(_throttle * 1.5, THROTTLE_MAX)
+
+
+def _speed_up():
+    global _throttle
+    with _throttle_lock:
+        if _throttle > 1.0:
+            _throttle = max(1.0, _throttle * 0.98)   # 성공이 쌓이면 조금씩 원래 속도로
 
 
 def fetch_region(tid, keyword=None):
     """지역 페이지 1개를 가져와 매물 목록을 반환. keyword 를 주면 당근 서버에서 미리 검색.
-    실패는 조용히 빈손 처리하지 않고 재시도한 뒤 BLOCK_HITS(403)/TIMEOUT_HITS(타임아웃)로 집계한다.
-    → 병렬 갈래에서 지역이 소리없이 빠지는 것을 줄이고(재시도), aggregate가 불완전 여부를 알 수 있게 한다."""
+
+    실패를 조용히 '매물 없음'으로 넘기지 않는 것이 이 함수의 핵심이다.
+    차단(403/429)·타임아웃·목록 없는 응답을 각각 재시도하고, 끝내 실패하면 집계한다.
+    → 병렬 갈래에서 지역이 소리없이 빠지지 않고, aggregate가 결과 불완전 여부를 알 수 있다."""
     global BLOCK_HITS, TIMEOUT_HITS
     params = {"in": tid}
     if keyword:
         params["search"] = keyword
-    for attempt in range(3):          # 최초 + 재시도 (403은 1회, 타임아웃은 2회까지)
-        time.sleep(random.uniform(FETCH_MIN, FETCH_MAX))
+    for attempt in range(4):
+        time.sleep(random.uniform(FETCH_MIN, FETCH_MAX) * _throttle)
         try:
             res = requests.get(
                 "https://www.daangn.com/kr/buy-sell/",
@@ -288,16 +313,32 @@ def fetch_region(tid, keyword=None):
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
                 timeout=12,
             )
-            if res.status_code == 403:
-                if attempt < 1:
-                    time.sleep(1.5)     # 소프트 차단은 잠깐 물러서면 풀리기도 한다
+            if res.status_code in BLOCK_CODES:
+                _slow_down()
+                if attempt < 3:
+                    # 당근이 Retry-After 로 대기 시간을 알려주면 그대로 따른다.
+                    try:
+                        wait = float(res.headers.get("Retry-After", "") or 0)
+                    except ValueError:
+                        wait = 0
+                    time.sleep(min(wait or 2.0 * (attempt + 1), 20))
                     continue
                 BLOCK_HITS += 1
-                time.sleep(1.0)
                 return None, []
-            return parse_page(res.text)
+            addr, items = parse_page(res.text)
+            if addr is None:
+                # 200인데 매물 목록 자체가 없는 응답 = 사실상 차단(또는 페이지 구조 변경).
+                # 예전엔 이걸 '이 동네엔 매물 없음'으로 삼켜서 전국 0건이 나왔다.
+                _slow_down()
+                if attempt < 3:
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                BLOCK_HITS += 1
+                return None, []
+            _speed_up()
+            return addr, items
         except Exception:
-            if attempt < 2:
+            if attempt < 3:
                 time.sleep(1.0 * (attempt + 1))   # 타임아웃은 점증 백오프로 재시도
                 continue
             TIMEOUT_HITS += 1

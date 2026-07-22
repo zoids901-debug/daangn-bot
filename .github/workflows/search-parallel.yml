@@ -54,7 +54,12 @@ jobs:
       - run: pip install -r requirements.txt
       - name: 갈래 ${{ matrix.i }} 검색
         env:
-          MAX_WORKERS: '4'       # 갈래별 IP가 신선하고 요청량이 적어(~425지역) 4워커 안전. 차단 보이면 2~3으로
+          # 2026-07-22 실측: 4워커(3.9 req/s)는 요청의 70%가 429(요청 과다)로 반려됐다.
+          # 그때는 429를 못 알아채고 빈손을 '매물 없음'으로 삼켜 전국 0건이 나왔다.
+          # 지금은 429를 차단으로 세고 스스로 감속하지만, 애초에 덜 두드리는 게 맞다.
+          MAX_WORKERS: '2'
+          FETCH_DELAY_MIN: '0.6'
+          FETCH_DELAY_MAX: '1.4'
         run: |
           mkdir -p results
           python daangn_search.py --mode search \

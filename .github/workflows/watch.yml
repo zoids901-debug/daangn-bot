@@ -56,7 +56,10 @@ jobs:
       - run: pip install -r requirements.txt
       - name: 갈래 ${{ matrix.i }} 감시
         env:
-          MAX_WORKERS: '4'     # 신선 IP + 갈래당 요청 적어 4워커 안전. 차단 보이면 2~3
+          # 검색과 같은 이유로 감속(2026-07-22: 4워커는 429가 70%). 아래 fetch_region 참고.
+          MAX_WORKERS: '2'
+          FETCH_DELAY_MIN: '0.6'
+          FETCH_DELAY_MAX: '1.4'
         run: |
           mkdir -p results
           python daangn_search.py --mode watch \
