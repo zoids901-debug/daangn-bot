@@ -618,6 +618,14 @@ def run_aggregate(target, keyword, indir):
             if fn.endswith(".json"):
                 paths.append(os.path.join(root, fn))
 
+    # 갈래 결과가 하나도 없다 = 실행이 취소되거나 전부 실패한 것.
+    # 이걸 그냥 집계하면 "검색 완료 0건"이라는 새빨간 거짓말이 나간다.
+    if not paths and target != "map":
+        msg = "⚠️ 검색이 중단돼 결과를 못 받았습니다(갈래 결과 파일 없음). 다시 시도해 주세요."
+        print("[aggregate] 갈래 결과 파일 없음 — 집계 생략")
+        send_telegram(msg)
+        return
+
     # map: 갈래 결과는 {지역코드: 지역명} 딕셔너리
     if target == "map":
         region_map = load_json(REGION_MAP_FILE, {})
