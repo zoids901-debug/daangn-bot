@@ -60,22 +60,17 @@ export default {
       }
       if (!keyword) return new Response("OK");
 
-      // 지역 있으면 단일(search.yml), 없으면 전국 병렬(search-parallel.yml).
-      let workflow, inputs, eta;
-      if (region) {
-        workflow = "search.yml";
-        inputs = { keyword, region };
-        eta = "";
-      } else {
-        workflow = "search-parallel.yml";
-        inputs = { keyword };
-        eta = "\n※ 전국 병렬검색 — ~10분 걸려요.";
-      }
-
-      const resp = await ghDispatch(env, workflow, inputs);
+      // 검색은 서버노트북(집 IP)에서 돈다. 깃허브 러너 IP는 당근이 총량으로 끊는다
+      // (2026-07-22 실측: 3초에 한 번으로 늦춰도 429가 48%, 9회 통과 후 차단 반복).
+      // 게다가 봇이 429를 못 알아봐서 '매물 없음'으로 삼켰다 → 전국 0건 오보.
+      // 집 IP는 같은 시험에서 429가 한 건도 없다.
+      const resp = await serverCommand(env, keyword, region);
+      const eta = region
+        ? "\n※ 서버가 최대 2분 안에 집어가요."
+        : "\n※ 전국은 50~65분 (집 IP 하나로 8,499지역).\n※ 지역을 붙이면 훨씬 빨라요: 검색 " + keyword + "/경기";
       if (resp.ok) {
         await sendMsg(env, chatId,
-          `🔍 검색 시작\n` +
+          `🔍 검색 시작 (서버노트북)\n` +
           `  키워드: ${keyword}\n` +
           `  지역: ${region || "전국"}\n\n` +
           `끝나면 결과 알림.` + eta
@@ -88,7 +83,42 @@ export default {
     }
   };
 
-  // ── GitHub Actions 워크플로 디스패치 ──
+  // ── 서버노트북에 명령 등록 (inkc-server/commands/*.json → poller 가 2분마다 집어간다) ──
+  // 서버는 바깥에서 못 들어가므로, 저장소에 파일 하나 놓아두면 서버가 가져가는 방식.
+  const SERVER_REPO = "zoids901-debug/inkc-server";
+
+  function serverCommand(env, keyword, region) {
+    const kst = new Date(Date.now() + 9 * 3600 * 1000);
+    const stamp = kst.toISOString().slice(0, 19).replace(/[-:T]/g, "");
+    const spec = {
+      cmd: "daangn-search",
+      keyword,
+      region: region || "",
+      why: "텔레그램 검색 요청",
+    };
+    return fetch(
+      `https://api.github.com/repos/${env.SERVER_REPO || SERVER_REPO}/contents/commands/${stamp}-daangn.json`,
+      {
+        method: "PUT",
+        headers: ghHeaders(env),
+        body: JSON.stringify({
+          message: `cmd: 당근 검색 ${keyword}`,
+          content: b64utf8(JSON.stringify(spec, null, 2) + "\n"),
+          branch: "main",
+        }),
+      }
+    );
+  }
+
+  // 한글이 들어가므로 btoa 에 그냥 넣으면 깨진다 → UTF-8 바이트로 바꿔서 인코딩.
+  function b64utf8(s) {
+    const bytes = new TextEncoder().encode(s);
+    let bin = "";
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin);
+  }
+
+  // ── GitHub Actions 워크플로 디스패치 (지금은 안 씀 — 비상용으로 남겨둠) ──
   function ghDispatch(env, workflow, inputs) {
     return fetch(
       `https://api.github.com/repos/${env.GH_REPO}/actions/workflows/${workflow}/dispatches`,
