@@ -100,7 +100,70 @@ def load_test(keyword, n, workers):
         print(f"    [본문표본 {ln}자] {head}")
 
 
+def ramp(keyword="아이폰", per_phase=60, cooldown=45):
+    """429가 안 나오는 최대 속도를 찾는다(느린 쪽에서 빠른 쪽으로 올려가며).
+
+    당근의 제한은 '총 횟수'가 아니라 '속도'다. 단계마다 목표 req/s 를 정해 그 속도로
+    쏘고 429 비율을 잰다. 한 번 걸리면 한동안 이어지므로 단계 사이에 쉬어준다.
+    마지막에 '429 0%였던 가장 빠른 속도'를 안전선으로 제시한다.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    # (목표 req/s, 동시 워커) — 느린 쪽부터. 워커를 늘리는 게 아니라 간격으로 속도를 만든다.
+    PHASES = [(0.5, 1), (1.0, 1), (1.5, 2), (2.0, 2), (3.0, 3), (4.0, 4)]
+    pos = 0
+    safe = None
+
+    def one(tid, gap):
+        time.sleep(gap)
+        try:
+            r = requests.get("https://www.daangn.com/kr/buy-sell/",
+                             params={"in": tid, "search": keyword},
+                             headers={"User-Agent": UA}, timeout=15)
+        except Exception:
+            return "예외"
+        if r.status_code == 429:
+            return "429"
+        if r.status_code != 200:
+            return f"HTTP{r.status_code}"
+        return "정상" if "__remixContext" in r.text else "목록없음"
+
+    print(f"=== 안전 속도 측정 (단계당 {per_phase}회, 단계 사이 {cooldown}초 휴식) ===")
+    for target, workers in PHASES:
+        tids = [1 + ((pos + i) * 37) % 8499 for i in range(per_phase)]
+        pos += per_phase
+        gap = workers / target          # 워커 1개가 요청마다 쉬는 시간
+        tally = {}
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for v in ex.map(lambda t: one(t, gap), tids):
+                tally[v] = tally.get(v, 0) + 1
+        el = time.time() - t0
+        actual = per_phase / el
+        n429 = tally.get("429", 0)
+        pct = n429 * 100 // per_phase
+        mark = "OK" if n429 == 0 else "제한"
+        print(f"  목표 {target:>4.1f} req/s (워커 {workers}) → 실측 {actual:4.1f} req/s | "
+              f"429 {n429:2d}/{per_phase} ({pct:2d}%) [{mark}] {tally}")
+        if n429 == 0:
+            safe = actual
+        else:
+            break                       # 한 번 걸리면 그 위는 볼 것도 없다
+        time.sleep(cooldown)             # 제한 창이 리셋되도록 쉬어준다
+
+    if safe:
+        print(f"\n>>> 안전선: 약 {safe:.1f} req/s 까지 429 없음")
+        print(f">>> 20갈래 병렬이면 갈래당 이 속도 → 8499지역 / 20 = 425지역 ≈ "
+              f"{425/safe/60:.1f}분")
+    else:
+        print("\n>>> 가장 느린 단계에서도 429 — 지금은 깃허브에서 검색을 자제할 것")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--ramp":
+        ramp(sys.argv[2] if len(sys.argv) > 2 else "아이폰",
+             int(sys.argv[3]) if len(sys.argv) > 3 else 60)
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "--load":
         load_test(sys.argv[2] if len(sys.argv) > 2 else "아이폰",
                   int(sys.argv[3]) if len(sys.argv) > 3 else 200,
