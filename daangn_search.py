@@ -446,14 +446,26 @@ def run_watch(chunk=None, out=None):
     seen = load_json(SEEN_FILE, {})
     tids = apply_chunk(sorted(int(t) for t in region_map.keys()), chunk)
     norm_keywords = [(k, keyword_words(k)) for k in keywords]
-    print(f"[watch] chunk={chunk or '전체'} / 지역 {len(tids)}개 / 키워드 {keywords}")
+
+    # 키워드가 적으면(≤3) 피드 훑기 대신 당근 서버 검색을 쓴다.
+    # 피드는 지역당 최신 ~260건이 끝이다(다음 페이지 없음 — 2026-07-22 확인). 바쁜 동네에선
+    # 회차(8시간) 사이에 그보다 많이 올라오면 뒤로 밀린 매물을 영영 놓친다.
+    # 서버 검색은 게시 시점과 무관하게 키워드 일치를 다 돌려주므로 깊이 한계가 없다.
+    # 요청 수 = 지역 × 키워드라, 키워드가 많으면 예전 방식(피드 1회로 전 키워드 대조)이 낫다.
+    search_mode = len(keywords) <= 3
+    jobs = ([(tid, kw) for tid in tids for kw in keywords] if search_mode
+            else [(tid, None) for tid in tids])
+    print(f"[watch] chunk={chunk or '전체'} / 지역 {len(tids)}개 / 키워드 {keywords} "
+          f"/ 방식={'서버검색' if search_mode else '피드훑기'} / 요청 {len(jobs)}개")
 
     global BLOCK_HITS
     new_items, done = [], 0
 
     def absorb(articles):
+        # 이미 본 매물도 버리지 않는다 — deliver_watch 가 '아직 팔리는 중' 표시(날짜 갱신)에 쓴다.
+        # 여기서 걸러버리면 30일 넘게 팔리는 매물이 seen 에서 청소된 뒤 '새 매물'로 재알림된다.
         for art in articles:
-            if not art["link"] or art["link"] in seen:
+            if not art["link"]:
                 continue
             for kw, words in norm_keywords:
                 if title_matches(art["title"], words):
@@ -462,12 +474,12 @@ def run_watch(chunk=None, out=None):
                     break
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = [ex.submit(fetch_region, tid) for tid in tids]
+        futures = [ex.submit(fetch_region, tid, kw) for tid, kw in jobs]
         for fut in as_completed(futures):
             done += 1
             if done % 100 == 0:
                 blk = f" · ⚠️차단 {BLOCK_HITS}건" if BLOCK_HITS else ""
-                print(f"  진행 {done}/{len(tids)} ... 신규후보 {len(new_items)}건{blk}", flush=True)
+                print(f"  진행 {done}/{len(jobs)} ... 후보 {len(new_items)}건{blk}", flush=True)
             try:
                 _, articles = fut.result()
             except Exception:
@@ -482,14 +494,15 @@ def run_watch(chunk=None, out=None):
             break
         print(f"  [보정{round_no}] 수집 실패 {len(retry)}개 지역 재수집(느린 속도)", flush=True)
         recovered = 0
-        for tid in retry:
-            addr, articles = fetch_region(tid)
-            if addr is None:
-                continue
-            recovered += 1
-            absorb(articles)
+        for tid in set(retry):
+            for kw in (keywords if search_mode else [None]):
+                addr, articles = fetch_region(tid, kw)
+                if addr is None:
+                    continue
+                recovered += 1
+                absorb(articles)
         BLOCK_HITS = max(0, BLOCK_HITS - recovered)
-        print(f"  [보정{round_no}] {recovered}/{len(retry)}개 지역 복구", flush=True)
+        print(f"  [보정{round_no}] {recovered}건 복구 (대상 {len(set(retry))}개 지역)", flush=True)
 
     if out:
         save_json(out, {"items": new_items,
@@ -514,7 +527,10 @@ def deliver_watch(new_items, seen):
     first_run = len(seen) == 0
     today = datetime.date.today().isoformat()
     fresh = [it for it in new_items if it["link"] not in seen]
-    for it in fresh:
+    # 새것뿐 아니라 '아직 보이는' 매물 전부 날짜를 갱신한다. fresh 만 찍으면 30일 넘게
+    # 팔리는 매물이 prune 에 청소된 뒤 다음 회차에 '새 매물'로 재알림된다(오래된 버그).
+    # 이렇게 하면 prune 의 의미가 '30일째 목록에서 안 보임 = 내려간 매물'로 바로잡힌다.
+    for it in new_items:
         seen[it["link"]] = today
     prune_seen(seen)
     save_json(SEEN_FILE, seen)
