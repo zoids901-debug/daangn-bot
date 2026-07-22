@@ -190,11 +190,22 @@ def get_tids_by_region(region_map, region_keyword):
 
 
 def apply_chunk(tids, chunk):
-    """chunk='3/20' -> 전체 tids 중 3번째 묶음만 (1-기반, 전국에 고르게 분산)."""
+    """전체 tids 중 내 몫만 골라낸다. 두 가지 형식을 받는다.
+
+      'i/N'      : N등분한 것 중 i번째 (1-기반, 인터리브 — 갈래 병렬용)
+      'a-b/N'    : N등분한 것 중 a..b번째 묶음 (연속 구간 — 하이브리드 분담용)
+                   예) 노트북='1-2/3'(앞 2/3), 서버='3-3/3'(뒤 1/3)
+    구간 방식도 인터리브로 떼어내 전국에 고르게 퍼지게 한다(한 지역만 몰리지 않게).
+    """
     if not chunk:
         return tids
-    i, n = chunk.split("/")
-    i, n = int(i), int(n)
+    rng, n = chunk.split("/")
+    n = int(n)
+    if "-" in rng:
+        a, b = (int(x) for x in rng.split("-"))
+        keep = set(range(a - 1, b))          # 0-기반 슬롯 a-1 .. b-1
+        return [t for k, t in enumerate(tids) if k % n in keep]
+    i = int(rng)
     return tids[i - 1::n]
 
 
@@ -587,15 +598,27 @@ def run_search(keyword, region, chunk=None, out=None):
 
     results, seen_fp, done = [], set(), 0
     total = len(tids)
-    single = not out          # 단발 실행(로컬/텔레그램 즉석검색) 여부
+    # 세 가지 실행 형태:
+    #   single   : 혼자 전국 돈다(chunk 없음, out 없음) — 시작·진행율·합산요약 다 보냄
+    #   part     : 하이브리드 조각(chunk 있음, out 없음) — 노션 실시간 적재는 하되 텔레그램은
+    #              자기 몫 완료 한 줄만(시작·진행율은 앞장 한 대만). 2대가 안 겹치게.
+    #   갈래(out) : 결과를 파일로만 남기고 aggregate가 나중에 합쳐 보낸다.
+    part = bool(chunk) and not out
+    single = not out and not chunk
+    realtime = single or part                 # 발견 즉시 노션 적재하는가
+    is_leader = part and str(chunk).startswith("1-")   # 시작 메시지 담당(앞장 1대)
     csv_f = csv_w = None
     prog_id = None
     t0 = time.time()
+    if single or is_leader:
+        send_telegram(f"🔍 즉석검색 시작\n키워드: {keyword} ({scope})"
+                      + ("\n※ 이 노트북+서버 동시 검색 중" if is_leader else ""))
     if single:
-        # 발견 즉시 노션+CSV에 쏘는 실시간 모드: 중간에 끊겨도 이미 찾은 건 보존된다.
-        send_telegram(f"🔍 즉석검색 시작\n키워드: {keyword} ({scope})")
         prog_id = send_telegram_id(f"📡 검색 진행율 0% (0/{total})\n✅ 발견 0건 · 남은시간 계산 중...")
-        csv_f = open(f"검색결과_{keyword.replace(' ', '_')}.csv", "w", encoding="utf-8-sig", newline="")
+    if realtime:
+        # 발견 즉시 노션+CSV에 쏘는 실시간 모드: 중간에 끊겨도 이미 찾은 건 보존된다.
+        tag = f"_{str(chunk).replace('/', '_')}" if part else ""
+        csv_f = open(f"검색결과_{keyword.replace(' ', '_')}{tag}.csv", "w", encoding="utf-8-sig", newline="")
         csv_w = csv.writer(csv_f)
         csv_w.writerow(["지역", "상품명", "가격", "링크"])
         csv_f.flush()
@@ -611,7 +634,7 @@ def run_search(keyword, region, chunk=None, out=None):
             seen_fp.add(fp)
             art["keyword"] = keyword
             results.append(art)
-            if single:
+            if realtime:
                 push_notion(art)                       # 발견 즉시 노션 적재
                 csv_w.writerow([art.get("addr", ""), art.get("title", ""),
                                 art.get("price", ""), art.get("link", "")])
@@ -669,13 +692,19 @@ def run_search(keyword, region, chunk=None, out=None):
               f"(차단 {BLOCK_HITS}·타임아웃 {TIMEOUT_HITS}) ({out})")
         return
 
-    # 단일 실행 마무리: CSV 닫고 진행율 100%로 마감 + 텔레그램 요약 (노션은 실시간 적재 완료)
     csv_f.close()
     lost = BLOCK_HITS + TIMEOUT_HITS
     warn = ""
     if lost:
         warn = (f"\n⚠️ 지역 {lost}개 수집 실패(차단 {BLOCK_HITS}·타임아웃 {TIMEOUT_HITS}) "
                 f"— 결과가 불완전할 수 있어요.")
+    if part:
+        # 하이브리드 조각: 자기 몫만 한 줄 요약(합산은 노션 DB에서 자동으로 합쳐짐).
+        where = "이 노트북" if is_leader else "서버"
+        send_telegram(f"🏁 [{where} 몫] {keyword} — {len(results)}건 완료{warn}")
+        print(f"[search] {where} 몫 완료 — {len(results)}건")
+        return
+    # 단일 실행 마무리: 진행율 100% + 합산 요약
     edit_telegram(prog_id, f"📡 검색 진행율 100% ({total}/{total})\n✅ 발견 {len(results)}건 · 완료")
     send_telegram(build_summary(f"🏁 즉석검색 완료 — {keyword} ({scope})", results) + warn)
     print(f"[search] 완료 — {len(results)}건 (차단 {BLOCK_HITS}·타임아웃 {TIMEOUT_HITS})")

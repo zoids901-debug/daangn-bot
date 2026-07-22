@@ -24,17 +24,22 @@ d.CHAT_ID         = get_cred("daangn_chat_id")
 d.NOTION_TOKEN    = get_cred("daangn_notion_token")
 d.NOTION_DATABASE = get_cred("daangn_notion_db")
 
-keyword = sys.argv[1] if len(sys.argv) > 1 else input("검색할 키워드: ").strip()
-region  = sys.argv[2] if len(sys.argv) > 2 else ""
+# 위치 인자(옛 검색.bat 호환) + --chunk(하이브리드 분담용)
+_args = [a for a in sys.argv[1:] if not a.startswith("--")]
+_chunk = ""
+for a in sys.argv[1:]:
+    if a.startswith("--chunk="):
+        _chunk = a.split("=", 1)[1]
+keyword = _args[0] if _args else input("검색할 키워드: ").strip()
+region  = _args[1] if len(_args) > 1 else ""
 
 if not keyword:
     print("키워드가 비어 있습니다.")
     sys.exit(1)
 
-print(f"\n'{keyword}' 전국 검색 시작 (집 인터넷 1개 IP, 8,499지역 = 약 23분)...")
-print("  ※ 워커 5개가 천장. 연결 재사용 + JSON 주소로 2.4배 빨라진 상태입니다.")
-print("  ※ 깃허브 병렬은 더 빠르지 않습니다 — 당근이 데이터센터 IP를 속도와 무관하게")
-print("     30% 이상 거절합니다(12.5초에 한 번 쏴도 30%). 러너 20대 = 이 노트북 1.4대.")
+scope = "전국" if not region else region
+part = f" [내 몫 {_chunk}]" if _chunk else ""
+print(f"\n'{keyword}' {scope} 검색 시작{part} (집 IP, 연결재사용+JSON)...")
 print("결과는 노션에 실시간 적재, 끝나면 텔레그램으로 요약이 옵니다.\n")
-d.run_search(keyword, region)
+d.run_search(keyword, region, chunk=_chunk or None)
 print("\n끝났습니다. 노션 DB와 텔레그램을 확인하세요.")
