@@ -278,7 +278,9 @@ BLOCK_CODES = (403, 429)
 # 429가 나오면 전체가 느려지도록 스스로 감속한다(갈래 안 공용).
 _throttle = 1.0
 _throttle_lock = threading.Lock()
-THROTTLE_MAX = 8.0
+# 감속 상한. 너무 크게 잡으면(8배) 전국 훑기가 30분 넘게 늘어진다.
+# 어차피 끝내 못 읽은 지역은 뒤의 보정 패스가 느리게 다시 훑으므로, 본 훑기는 3배까지만.
+THROTTLE_MAX = 3.0
 
 # 끝내 못 읽은 지역. 훑기가 끝난 뒤 느린 속도로 다시 훑어 메운다(보정 패스).
 # 이게 없으면 차단이 많은 날에는 그 지역 매물이 통째로 빠진 채 결과가 나온다.
@@ -308,7 +310,7 @@ def _speed_up():
     global _throttle
     with _throttle_lock:
         if _throttle > 1.0:
-            _throttle = max(1.0, _throttle * 0.98)   # 성공이 쌓이면 조금씩 원래 속도로
+            _throttle = max(1.0, _throttle * 0.9)   # 성공이 이어지면 곧 원래 속도로 복귀
 
 
 def fetch_region(tid, keyword=None):
