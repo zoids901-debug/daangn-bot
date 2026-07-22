@@ -26,6 +26,10 @@ on:
         description: '요청자 판별(1이면 실행). 러너 공인 IP + 헤더별 통과율 — 속도가 아니라 IP/헤더 문제인지 가른다'
         required: false
         default: '0'
+      budget:
+        description: '제한 양동이 측정(1이면 실행). 크기와 회복시간을 재서 지속 가능 속도를 뽑는다'
+        required: false
+        default: '0'
 
 jobs:
   diag:
@@ -48,3 +52,6 @@ jobs:
       - name: 요청자 판별 (IP·헤더)
         if: inputs.fingerprint == '1'
         run: python _diag_search.py --fingerprint
+      - name: 제한 양동이 측정
+        if: inputs.budget == '1'
+        run: python _diag_search.py --budget

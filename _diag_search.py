@@ -212,7 +212,63 @@ def fingerprint(keyword="아이폰", tid="1477"):
         print(f"  {label:20s} 12회 → 성공 {ok:2d} · {codes}")
 
 
+def budget(keyword="아이폰", tid="1477", rounds=3):
+    """당근의 제한이 '양동이'라고 보고 그 크기와 채워지는 속도를 잰다.
+
+    관측: 12회씩 세 번 쏘니 9성공 → 12차단 → 9성공. 속도를 13배 늦춰도 절반이 막혔다.
+    즉 '초당 몇 회'가 아니라 '일정 시간에 몇 회'로 끊는다(양동이). 그렇다면
+      · 양동이 크기 = 처음 막힐 때까지 성공한 횟수
+      · 채워지는 속도 = 막힌 뒤 다시 통과할 때까지 걸린 시간
+    이 둘을 알면 지속 가능한 속도(= 1 / 회복시간)가 그대로 나온다.
+    """
+    hdr = {"User-Agent": UA}
+
+    def hit():
+        try:
+            r = requests.get("https://www.daangn.com/kr/buy-sell/",
+                             params={"in": tid, "search": keyword}, headers=hdr, timeout=15)
+            return r.status_code
+        except Exception:
+            return 0
+
+    print("=== 제한 양동이 측정 ===")
+    sizes, waits = [], []
+    for rnd in range(1, rounds + 1):
+        # 1) 막힐 때까지 1초 간격으로 쏜다 → 양동이 크기
+        n = 0
+        while n < 60:
+            if hit() == 429:
+                break
+            n += 1
+            time.sleep(1.0)
+        sizes.append(n)
+        # 2) 5초마다 한 번씩 두드려 언제 다시 통과하는지 → 회복 시간
+        t0 = time.time()
+        waited = None
+        while time.time() - t0 < 240:
+            time.sleep(5.0)
+            if hit() == 200:
+                waited = time.time() - t0
+                break
+        waits.append(waited)
+        print(f"  {rnd}회차: 연속 성공 {n}회 후 차단 → 회복까지 "
+              f"{('%.0f초' % waited) if waited else '240초 넘음'}")
+
+    good = [w for w in waits if w]
+    if good:
+        avg = sum(good) / len(good)
+        rate = 1 / avg
+        print(f"\n>>> 양동이 크기 ≈ {sum(sizes)//len(sizes)}회 · 회복 ≈ {avg:.0f}초")
+        print(f">>> 지속 가능 속도 ≈ {rate:.2f} req/s (갈래 1개 기준)")
+        print(f">>> 8499지역 / 20갈래 = 425지역 → 갈래당 약 {425/rate/60:.0f}분")
+    else:
+        print("\n>>> 4분을 기다려도 안 풀림 — 속도 조절로는 답이 없다(경로 변경 필요)")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--budget":
+        budget()
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "--fingerprint":
         fingerprint()
         return
