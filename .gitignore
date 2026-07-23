@@ -11,3 +11,6 @@ main
 # 하이브리드 poller 단일 인스턴스 락 (로컬 전용)
 .hybrid_poller.lock
 hybrid_poller.log
+
+# 새벽에 보류한 알림(런타임 임시 — 서버/노트북 로컬, 커밋하면 충돌)
+watch_pending.json

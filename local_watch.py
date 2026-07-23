@@ -32,15 +32,17 @@ d.run_watch()                          # 단일 실행 모드: 전달 + seen.jso
 
 
 def push_seen():
-    """seen.json 을 원격에도 반영한다. 이 장부가 밀리면 같은 매물이 또 알림된다."""
+    """seen.json + 키워드 초기화 장부를 원격에도 반영한다. 이 장부가 밀리면 같은 매물이
+    또 알림되고, 키워드 초기화 장부가 커밋 안 되면 다음 회차 reset --hard 에 지워진다."""
+    LEDGERS = ["seen.json", "watch_keywords_seen.json"]
     def git(*a):
         return subprocess.run(["git", "-C", HERE, *a], capture_output=True, text=True, timeout=120)
 
-    st = git("status", "--porcelain", "seen.json")
+    st = git("status", "--porcelain", *LEDGERS)
     if not st.stdout.strip():
-        print("[감시] seen.json 변화 없음")
+        print("[감시] 장부 변화 없음")
         return
-    git("add", "seen.json")
+    git("add", *LEDGERS)
     git("commit", "-m", "auto: watch seen.json (server)")
     for _ in range(3):
         if git("push").returncode == 0:
