@@ -47,8 +47,15 @@ NOTION_DATABASE = os.environ.get("NOTION_DATABASE_ID", "")
 REGION_MAP_FILE = "region_map.json"
 KEYWORDS_FILE   = "keywords.json"
 SEEN_FILE       = "seen.json"
+KW_INIT_FILE    = "watch_keywords_seen.json"  # 첫 회차를 마친 감시 키워드 목록(키워드별 폭주 방지)
+PENDING_FILE    = "watch_pending.json"        # 새벽에 억제해 쌓아둔 알림(낮 회차에 발송)
 
 SEEN_TTL_DAYS   = 30
+# 새벽 알림 억제 구간(KST). 이 시간대엔 매물을 장부에 기록만 하고 알림은 PENDING 에
+# 쌓아뒀다가, 이 구간 밖의 첫 회차에 몰아서 보낸다. 서버가 새벽에 깨서 밀린 회차를
+# 돌려도 잠을 깨우지 않게 한다(2026-07-23 새벽 로우라이더 폭주 대응).
+QUIET_START_H   = 0    # 00시부터
+QUIET_END_H     = 7    # 07시 전까지 억제
 # 동시 요청 수. 깃허브 IP 안전선은 측정상 2 (초당 ~1회). 환경변수로 덮어쓸 수 있다.
 MAX_WORKERS     = int(os.environ.get("MAX_WORKERS", "4"))
 SEND_DELAY      = 0.4   # 텔레그램 메시지 간격(초)
@@ -526,8 +533,21 @@ def run_watch(chunk=None, out=None):
     deliver_watch(new_items, seen)
 
 
+def _kst_hour():
+    return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).hour
+
+
 def deliver_watch(new_items, seen):
-    """새 매물 후보를 받아 텔레그램·노션 전달 + seen.json 갱신·커밋용 저장."""
+    """새 매물 후보를 받아 텔레그램·노션 전달 + seen.json 갱신·커밋용 저장.
+
+    [키워드별 첫 회차 침묵] 새 키워드를 감시에 추가하면 봇은 그 키워드를 한 번도 본
+    적이 없어 '이미 올라와 있던 매물 전부'가 새 매물로 잡힌다(2026-07-23 로우라이더
+    75건 새벽 폭주). 그래서 아직 초기화 안 된 키워드는 현재 매물을 장부에만 조용히
+    기록하고 알림은 생략한다. 다음 회차부터 그 키워드도 '진짜 새로 올라온 것'만 알린다.
+    (전역 first_run 침묵을 키워드 단위로 확장한 것.)
+
+    [새벽 억제] QUIET 구간(KST 00~07)엔 보내지 않고 PENDING 에 쌓았다가 낮에 몰아 보낸다.
+    """
     # 링크 기준 중복 제거
     uniq = {}
     for it in new_items:
@@ -535,28 +555,61 @@ def deliver_watch(new_items, seen):
             uniq[it["link"]] = it
     new_items = list(uniq.values())
 
-    first_run = len(seen) == 0
     today = datetime.date.today().isoformat()
+    global_first_run = len(seen) == 0
+
+    # ── 키워드별 첫 회차 판정 ──
+    inited = set(load_json(KW_INIT_FILE, []))
+    kws_this_run = {it.get("keyword", "") for it in new_items if it.get("keyword")}
+    new_kws = {k for k in kws_this_run if k not in inited}
+    # 차단이 심한 회차는 매물을 다 못 읽었으니 초기화를 확정하지 않는다(다음 깨끗한 회차로 미룸).
+    run_clean = BLOCK_HITS <= 30
+
+    # '처음 보는' 매물 = 아직 장부에 없는 것 (seen 갱신 전에 계산)
     fresh = [it for it in new_items if it["link"] not in seen]
-    # 새것뿐 아니라 '아직 보이는' 매물 전부 날짜를 갱신한다. fresh 만 찍으면 30일 넘게
-    # 팔리는 매물이 prune 에 청소된 뒤 다음 회차에 '새 매물'로 재알림된다(오래된 버그).
-    # 이렇게 하면 prune 의 의미가 '30일째 목록에서 안 보임 = 내려간 매물'로 바로잡힌다.
+    # 알릴 대상 = 이미 초기화된 키워드의 새 매물만. 새 키워드는 조용히 기록만.
+    to_alert = [it for it in fresh if it.get("keyword", "") not in new_kws]
+
+    # 아직 보이는 매물 전부 날짜 갱신(fresh 만 찍으면 30일 넘게 팔리는 매물이 prune 뒤 재알림됨)
     for it in new_items:
         seen[it["link"]] = today
     prune_seen(seen)
     save_json(SEEN_FILE, seen)
 
-    if first_run:
+    # 이번 회차에 (충분히) 읽힌 새 키워드는 초기화 완료로 표시
+    if run_clean and new_kws:
+        save_json(KW_INIT_FILE, sorted(inited | kws_this_run))
+
+    if global_first_run:
         send_telegram(f"🥕 알림봇 가동 시작!\n현재 매물 {len(fresh)}건을 기록했습니다.\n다음 실행부터 '새 매물'만 알려드립니다.")
         print(f"[watch] 첫 실행 — {len(fresh)}건 기록만 (알림 생략)")
         return
 
-    for it in fresh:
+    # ── 새벽 억제: 지금 보내면 잠을 깨운다 → 장부엔 이미 기록됐으니 알림만 미뤄 쌓아둔다 ──
+    pending = load_json(PENDING_FILE, [])
+    if QUIET_START_H <= _kst_hour() < QUIET_END_H:
+        pending.extend(to_alert)
+        save_json(PENDING_FILE, pending)
+        print(f"[watch] 새벽({_kst_hour()}시) — 알림 {len(to_alert)}건 보류 "
+              f"(누적 {len(pending)}건), 낮 회차에 발송")
+        return
+
+    # ── 낮: 밀렸던 새벽 알림까지 함께 보낸다 ──
+    outbox = pending + to_alert
+    if pending:
+        save_json(PENDING_FILE, [])
+    for it in outbox:
         send_item(it)
-    if fresh:
-        kws = ", ".join(sorted(set(it.get("keyword", "") for it in fresh)))
-        send_telegram(f"🥕 알림봇: 새 매물 {len(fresh)}건 발견 ({kws})")
-    print(f"[watch] 완료 — 새 매물 {len(fresh)}건")
+    if outbox:
+        kws = ", ".join(sorted({it.get("keyword", "") for it in outbox}))
+        held = f" (밤새 보류분 {len(pending)}건 포함)" if pending else ""
+        send_telegram(f"🥕 알림봇: 새 매물 {len(outbox)}건 발견 ({kws}){held}")
+    if run_clean and new_kws:
+        n = sum(1 for it in new_items if it.get("keyword", "") in new_kws)
+        send_telegram(f"🆕 감시 키워드 추가: {', '.join(sorted(new_kws))} — 현재 매물 {n}건은 "
+                      f"기록만 하고, 다음부터 새로 올라오는 것만 알립니다.")
+    print(f"[watch] 완료 — 발송 {len(outbox)}건"
+          + (f" · 새 키워드 {len(new_kws)}개 침묵기록" if new_kws else ""))
 
 
 def prune_seen(seen):
